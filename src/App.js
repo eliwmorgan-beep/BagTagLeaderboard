@@ -3,18 +3,19 @@ import { db, ensureAnonAuth } from "./firebase";
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
-const ADMIN_PASSWORD = "pescadopassword";
+const ADMIN_PASSWORD = "pescado!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
 }
 
-function computeDerived(players, rounds, adjustments) {
+/**
+ * Compute current leaderboard tags by replaying rounds from players' baseline startTag.
+ * NOTE: No persistent "adjustments" are applied anymore (prevents weird future reshuffles).
+ */
+function computeLeaderboard(players, rounds) {
   const currentTags = {};
   players.forEach((p) => (currentTags[p.id] = Number(p.startTag)));
-
-  const history = {};
-  players.forEach((p) => (history[p.id] = []));
 
   for (const r of rounds) {
     const participants = (r.scores || [])
@@ -27,106 +28,90 @@ function computeDerived(players, rounds, adjustments) {
 
     if (participants.length < 2) continue;
 
+    // lowest score wins
     participants.sort((a, b) => a.score - b.score);
+
+    // lowest tag is best
     const tags = participants.map((p) => p.oldTag).sort((a, b) => a - b);
 
+    // assign tags by finish order
     participants.forEach((p, i) => {
       currentTags[p.id] = tags[i];
-      history[p.id].push({
-        roundId: r.id,
-        date: r.date,
-        oldTag: p.oldTag,
-        newTag: tags[i],
-        score: p.score,
-      });
     });
   }
 
-  const adj = Array.isArray(adjustments) ? adjustments : [];
-  for (const a of adj) {
-    if (a.type !== "dropToLast") continue;
-    const pid = a.playerId;
-
-    let maxTag = -Infinity;
-    let maxId = null;
-
-    for (const [id, tag] of Object.entries(currentTags)) {
-      if (tag > maxTag) {
-        maxTag = tag;
-        maxId = id;
-      }
-    }
-
-    if (pid in currentTags && maxId && pid !== maxId) {
-      const temp = currentTags[pid];
-      currentTags[pid] = currentTags[maxId];
-      currentTags[maxId] = temp;
-    }
-  }
-
-  return {
-    leaderboard: players.map((p) => ({
-      id: p.id,
-      name: p.name,
-      tag: currentTags[p.id],
-    })),
-    history,
-  };
+  return players.map((p) => ({
+    id: p.id,
+    name: p.name,
+    tag: currentTags[p.id],
+  }));
 }
 
 export default function App() {
-  const [players, setPlayers] = useState([]);
-  const [rounds, setRounds] = useState([]);
-  const [adjustments, setAdjustments] = useState([]);
+  const [players, setPlayers] = useState([]); // {id, name, startTag}
+  const [rounds, setRounds] = useState([]); // {id, date, scores:[{id,score}]}
+  const [leaderboard, setLeaderboard] = useState([]); // derived
 
-  const [leaderboard, setLeaderboard] = useState([]);
-  const [history, setHistory] = useState({});
-
+  // Round entry UI
   const [roundPlayers, setRoundPlayers] = useState([]);
   const [scores, setScores] = useState({});
 
+  // Add player UI
   const [name, setName] = useState("");
   const [tag, setTag] = useState("");
 
+  // Admin UI (dropdown selection for "Drop Player to Last")
+  const [adminDropPlayerId, setAdminDropPlayerId] = useState("");
+
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
 
+  // Subscribe to shared data
   useEffect(() => {
     let unsub = () => {};
 
     (async () => {
       await ensureAnonAuth();
+
       const first = await getDoc(leagueRef);
       if (!first.exists()) {
-        await setDoc(leagueRef, {
-          players: [],
-          rounds: [],
-          adjustments: [],
-        });
+        await setDoc(leagueRef, { players: [], rounds: [] });
       }
 
       unsub = onSnapshot(leagueRef, (snap) => {
         const data = snap.data() || {};
-        setPlayers(data.players || []);
-        setRounds(data.rounds || []);
-        setAdjustments(data.adjustments || []);
+        const p = data.players || [];
+        const r = data.rounds || [];
 
-        const derived = computeDerived(
-          data.players || [],
-          data.rounds || [],
-          data.adjustments || []
-        );
-        setLeaderboard(derived.leaderboard);
-        setHistory(derived.history);
+        setPlayers(p);
+        setRounds(r);
+        setLeaderboard(computeLeaderboard(p, r));
       });
-    })();
+    })().catch(console.error);
 
     return () => unsub();
   }, [leagueRef]);
 
+  // Keep dropdown selection valid as players change
+  useEffect(() => {
+    if (!adminDropPlayerId) return;
+    const exists = leaderboard.some((p) => p.id === adminDropPlayerId);
+    if (!exists) setAdminDropPlayerId("");
+  }, [leaderboard, adminDropPlayerId]);
+
   async function addPlayer() {
     if (!name || !tag) return;
+
     const startTag = Number(tag);
-    if (leaderboard.some((p) => p.tag === startTag)) return;
+    if (Number.isNaN(startTag)) {
+      alert("Please enter a valid tag number.");
+      return;
+    }
+
+    // Prevent duplicates vs current leaderboard tags
+    if (leaderboard.some((p) => p.tag === startTag)) {
+      alert("That tag is already taken.");
+      return;
+    }
 
     await updateDoc(leagueRef, {
       players: [...players, { id: uid(), name, startTag }],
@@ -143,14 +128,20 @@ export default function App() {
   }
 
   async function finalizeRound() {
-    if (roundPlayers.length < 2) return;
+    if (roundPlayers.length < 2) {
+      alert("Select at least 2 players.");
+      return;
+    }
 
     const scoresList = roundPlayers.map((id) => ({
       id,
       score: Number(scores[id]),
     }));
 
-    if (scoresList.some((s) => Number.isNaN(s.score))) return;
+    if (scoresList.some((s) => Number.isNaN(s.score))) {
+      alert("Enter all scores.");
+      return;
+    }
 
     await updateDoc(leagueRef, {
       rounds: [
@@ -165,33 +156,107 @@ export default function App() {
 
   async function adminAction(action) {
     const pw = window.prompt("Admin password:");
-    if (pw !== ADMIN_PASSWORD) return;
+    if (pw !== ADMIN_PASSWORD) {
+      alert("Wrong password.");
+      return;
+    }
     await action();
   }
 
   async function deleteLastRound() {
-    if (!rounds.length) return;
+    if (!rounds.length) {
+      alert("No rounds to delete.");
+      return;
+    }
+
+    const last = rounds[rounds.length - 1];
+    const ok = window.confirm(
+      `Delete the last round from ${last.date}? This will update everyone's tags.`
+    );
+    if (!ok) return;
+
     await updateDoc(leagueRef, { rounds: rounds.slice(0, -1) });
+
+    setRoundPlayers([]);
+    setScores({});
   }
 
+  /**
+   * ADMIN: Drop a player to last (highest tag) WITHOUT deleting rounds.
+   * ONE-TIME change: updates players' baseline startTag so it won't reapply later.
+   */
   async function dropPlayerToLast() {
-    const tagNum = Number(
-      window.prompt("Enter CURRENT tag number to drop to last:")
-    );
-    const player = leaderboard.find((p) => p.tag === tagNum);
-    if (!player) return;
+    if (!leaderboard.length) {
+      alert("No players yet.");
+      return;
+    }
 
-    await updateDoc(leagueRef, {
-      adjustments: [
-        ...adjustments,
-        { id: uid(), type: "dropToLast", playerId: player.id },
-      ],
-    });
+    const targetId = adminDropPlayerId;
+    if (!targetId) {
+      alert("Select a player from the dropdown first.");
+      return;
+    }
+
+    const target = leaderboard.find((p) => p.id === targetId);
+    if (!target) {
+      alert("Selected player not found.");
+      return;
+    }
+
+    // Find last-place (highest tag)
+    let last = null;
+    for (const p of leaderboard) {
+      if (!last || p.tag > last.tag) last = p;
+    }
+    if (!last) return;
+
+    if (last.id === target.id) {
+      alert(`${target.name} is already last (#${last.tag}).`);
+      return;
+    }
+
+    const ok = window.confirm(
+      `Drop ${target.name} (#${target.tag}) to last place (#${last.tag})?\n\nThis will NOT delete rounds. It only changes current tag order.`
+    );
+    if (!ok) return;
+
+    // Build a tag map from CURRENT tags
+    const tagMap = {};
+    leaderboard.forEach((p) => (tagMap[p.id] = p.tag));
+
+    // Swap target with last to keep tags unique
+    const temp = tagMap[target.id];
+    tagMap[target.id] = tagMap[last.id];
+    tagMap[last.id] = temp;
+
+    // Write new baseline tags back into players.startTag
+    const newPlayers = players.map((p) => ({
+      ...p,
+      startTag: tagMap[p.id],
+    }));
+
+    await updateDoc(leagueRef, { players: newPlayers });
+
+    // Clear selection after action
+    setAdminDropPlayerId("");
   }
 
   async function resetAll() {
-    await updateDoc(leagueRef, { players: [], rounds: [], adjustments: [] });
+    const ok = window.confirm(
+      "This will delete ALL players and ALL rounds for everyone. Continue?"
+    );
+    if (!ok) return;
+
+    await updateDoc(leagueRef, { players: [], rounds: [] });
+
+    setRoundPlayers([]);
+    setScores({});
+    setName("");
+    setTag("");
+    setAdminDropPlayerId("");
   }
+
+  const sortedLeaderboard = [...leaderboard].sort((a, b) => a.tag - b.tag);
 
   return (
     <div
@@ -220,17 +285,15 @@ export default function App() {
 
         <h3>Leaderboard</h3>
         <ul style={{ listStyle: "none", padding: 0 }}>
-          {[...leaderboard]
-            .sort((a, b) => a.tag - b.tag)
-            .map((p) => (
-              <li key={p.id}>
-                <strong>#{p.tag}</strong> – {p.name}
-              </li>
-            ))}
+          {sortedLeaderboard.map((p) => (
+            <li key={p.id}>
+              <strong>#{p.tag}</strong> – {p.name}
+            </li>
+          ))}
         </ul>
 
         <h3>Create Tag Round</h3>
-        {leaderboard.map((p) => (
+        {sortedLeaderboard.map((p) => (
           <div key={p.id}>
             <label>
               <input
@@ -257,7 +320,7 @@ export default function App() {
           Finalize Round
         </button>
 
-        {/* ADD PLAYER MOVED HERE */}
+        {/* Add Player moved to bottom above Admin Tools */}
         <h3 style={{ marginTop: 24 }}>Add Player</h3>
         <input
           placeholder="Name"
@@ -285,12 +348,46 @@ export default function App() {
         >
           Delete Last Round
         </button>
-        <button
-          onClick={() => adminAction(dropPlayerToLast)}
-          style={{ margin: 4 }}
-        >
-          Drop Player to Last
-        </button>
+
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>
+            Drop Player to Last
+          </div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <select
+              value={adminDropPlayerId}
+              onChange={(e) => setAdminDropPlayerId(e.target.value)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 8,
+                border: "1px solid #ccc",
+                minWidth: 220,
+              }}
+            >
+              <option value="">Select player…</option>
+              {sortedLeaderboard.map((p) => (
+                <option key={p.id} value={p.id}>
+                  #{p.tag} — {p.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              onClick={() => adminAction(dropPlayerToLast)}
+              style={{ margin: 4 }}
+            >
+              Drop to Last
+            </button>
+          </div>
+        </div>
+
         <button onClick={() => adminAction(resetAll)} style={{ margin: 4 }}>
           Reset All Data
         </button>
