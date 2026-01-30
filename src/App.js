@@ -3,7 +3,7 @@ import { db, ensureAnonAuth } from "./firebase";
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
-const ADMIN_PASSWORD = "pescado!";
+const ADMIN_PASSWORD = "Pescado!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
