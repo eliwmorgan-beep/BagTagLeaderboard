@@ -76,13 +76,14 @@ function computeRoundSwaps(currentLeaderboard, scoreList) {
 export default function App() {
   const [players, setPlayers] = useState([]); // {id, name, startTag}
   const [rounds, setRounds] = useState([]); // [{id, date, scores:[{id,score}], system?:true}]
-  const [roundHistory, setRoundHistory] = useState([]); // [{id,date,entries:[{id,name,score,oldTag,newTag}]}]
+  const [roundHistory, setRoundHistory] = useState([]); // [{id,date,entries:[...], comment?:string}]
 
   const [leaderboard, setLeaderboard] = useState([]);
 
   // Round entry UI
   const [roundPlayers, setRoundPlayers] = useState([]);
   const [scores, setScores] = useState({});
+  const [roundComment, setRoundComment] = useState(""); // NEW
 
   // Add player UI
   const [name, setName] = useState("");
@@ -200,8 +201,18 @@ export default function App() {
     const roundId = uid();
     const date = new Date().toLocaleString();
 
+    const trimmedComment = (roundComment || "").trim();
+
+    // rounds array is only used for leaderboard math; keep it score-only
     const newRound = { id: roundId, date, scores: scoreList };
-    const newRoundHistoryItem = { id: roundId, date, entries };
+
+    // roundHistory is for display; store comment here
+    const newRoundHistoryItem = {
+      id: roundId,
+      date,
+      entries,
+      comment: trimmedComment ? trimmedComment : "",
+    };
 
     await updateDoc(leagueRef, {
       rounds: [...rounds, newRound],
@@ -210,6 +221,7 @@ export default function App() {
 
     setRoundPlayers([]);
     setScores({});
+    setRoundComment(""); // NEW: clear after submit
 
     // Nice UX: open history and expand the newest round
     setHistoryExpanded(true);
@@ -252,6 +264,7 @@ export default function App() {
 
     setRoundPlayers([]);
     setScores({});
+    setRoundComment("");
 
     setExpandedRoundIds((prev) => {
       const copy = { ...prev };
@@ -265,9 +278,6 @@ export default function App() {
    * rotating everyone below them up one spot.
    *
    * This does NOT change Round History.
-   *
-   * Implementation: append a hidden "system round" with ALL affected players.
-   * Finish order is arranged so tags rotate upward and target receives the highest tag.
    */
   async function dropPlayerToLast() {
     if (!sortedLeaderboard.length) {
@@ -339,6 +349,7 @@ export default function App() {
 
     setRoundPlayers([]);
     setScores({});
+    setRoundComment("");
     setName("");
     setTag("");
     setAdminDropPlayerId("");
@@ -412,6 +423,27 @@ export default function App() {
               )}
             </div>
           ))}
+
+          {/* NEW: Round comment field */}
+          <div style={{ marginTop: 12 }}>
+            <textarea
+              placeholder="Round comment (optional)…"
+              value={roundComment}
+              onChange={(e) => setRoundComment(e.target.value)}
+              rows={2}
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                padding: 10,
+                borderRadius: 10,
+                border: "1px solid #dbe9ff",
+                resize: "vertical",
+                fontFamily: "Arial, sans-serif",
+                fontSize: 14,
+              }}
+            />
+          </div>
+
           <button onClick={finalizeRound} style={{ marginTop: 8 }}>
             Finalize Round
           </button>
@@ -547,6 +579,33 @@ export default function App() {
 
                         {isOpen && (
                           <>
+                            {/* NEW: Comment shown only when expanded */}
+                            {r.comment && r.comment.trim() ? (
+                              <div
+                                style={{
+                                  marginTop: 10,
+                                  padding: 10,
+                                  borderRadius: 10,
+                                  background: "#f3f9ff",
+                                  border: "1px solid #dbe9ff",
+                                  fontSize: 14,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    opacity: 0.7,
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  Comment
+                                </div>
+                                <div style={{ whiteSpace: "pre-wrap" }}>
+                                  {r.comment}
+                                </div>
+                              </div>
+                            ) : null}
+
                             <div style={{ fontSize: 14, marginTop: 10 }}>
                               {Array.isArray(r.entries) &&
                                 r.entries.map((e) => (
@@ -662,7 +721,7 @@ export default function App() {
             color: "#666",
           }}
         >
-          Version 1.2 Developed by Eli Morgan
+          Version 1.3 Developed by Eli Morgan
         </div>
       </div>
     </div>
