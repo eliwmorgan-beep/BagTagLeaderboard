@@ -3,7 +3,7 @@ import { db, ensureAnonAuth } from "./firebase";
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
-const ADMIN_PASSWORD = "ChangeThisToYourOwnPassword123!";
+const ADMIN_PASSWORD = "pescado!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
@@ -90,6 +90,11 @@ export default function App() {
 
   // Admin UI dropdown
   const [adminDropPlayerId, setAdminDropPlayerId] = useState("");
+
+  // Round History UI controls
+  const [historyExpanded, setHistoryExpanded] = useState(false); // collapses entire section
+  const [expandedRoundIds, setExpandedRoundIds] = useState({}); // per-round expansion
+  const [historyLimit, setHistoryLimit] = useState(5); // show last X rounds
 
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
 
@@ -205,6 +210,10 @@ export default function App() {
 
     setRoundPlayers([]);
     setScores({});
+
+    // Nice UX: open history and expand the newest round
+    setHistoryExpanded(true);
+    setExpandedRoundIds((prev) => ({ ...prev, [roundId]: true }));
   }
 
   async function adminAction(action) {
@@ -243,6 +252,13 @@ export default function App() {
 
     setRoundPlayers([]);
     setScores({});
+
+    // Keep UI tidy if the expanded round no longer exists
+    setExpandedRoundIds((prev) => {
+      const copy = { ...prev };
+      delete copy[lastUser.id];
+      return copy;
+    });
   }
 
   /**
@@ -303,7 +319,6 @@ export default function App() {
 
     await updateDoc(leagueRef, {
       rounds: [...rounds, sysRound],
-      // roundHistory unchanged on purpose
     });
 
     setAdminDropPlayerId("");
@@ -322,6 +337,17 @@ export default function App() {
     setName("");
     setTag("");
     setAdminDropPlayerId("");
+    setHistoryExpanded(false);
+    setExpandedRoundIds({});
+  }
+
+  const visibleHistory = [...roundHistory]
+    .slice()
+    .reverse()
+    .slice(0, historyLimit);
+
+  function toggleRoundExpand(id) {
+    setExpandedRoundIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
   return (
@@ -403,72 +429,158 @@ export default function App() {
           Add
         </button>
 
-        {/* ROUND HISTORY */}
+        {/* ROUND HISTORY (COLLAPSIBLE) */}
         <hr style={{ margin: "24px 0" }} />
-        <h3 style={{ marginBottom: 10 }}>Round History</h3>
 
-        {roundHistory.length === 0 ? (
-          <div style={{ opacity: 0.7, marginBottom: 12 }}>
-            No rounds logged yet.
-          </div>
-        ) : (
+        <button
+          onClick={() => setHistoryExpanded((v) => !v)}
+          style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            borderRadius: 10,
+            border: "1px solid #dbe9ff",
+            background: "#f3f9ff",
+            cursor: "pointer",
+          }}
+        >
+          {historyExpanded ? "Hide Round History" : "Show Round History"}{" "}
+          {roundHistory.length ? `(${roundHistory.length})` : ""}
+        </button>
+
+        {historyExpanded && (
           <div style={{ textAlign: "left" }}>
-            {[...roundHistory]
-              .slice()
-              .reverse()
-              .map((r) => (
+            {roundHistory.length === 0 ? (
+              <div style={{ opacity: 0.7, marginBottom: 12 }}>
+                No rounds logged yet.
+              </div>
+            ) : (
+              <>
                 <div
-                  key={r.id}
                   style={{
-                    border: "1px solid #dbe9ff",
-                    borderRadius: 10,
-                    padding: 12,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    alignItems: "center",
                     marginBottom: 10,
+                    flexWrap: "wrap",
                   }}
                 >
-                  <div style={{ textAlign: "center", marginBottom: 10 }}>
-                    <strong>{r.date}</strong>
-                  </div>
+                  <div style={{ fontWeight: "bold" }}>Round History</div>
 
-                  <div style={{ fontSize: 14 }}>
-                    {Array.isArray(r.entries) &&
-                      r.entries.map((e) => (
-                        <div
-                          key={e.id}
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            padding: "6px 0",
-                            borderBottom: "1px solid #eef5ff",
-                          }}
-                        >
-                          <div style={{ flex: 1 }}>
-                            <strong>{e.name}</strong>
-                          </div>
-                          <div style={{ width: 80, textAlign: "right" }}>
-                            score {e.score}
-                          </div>
-                          <div style={{ width: 140, textAlign: "right" }}>
-                            #{e.oldTag} → #{e.newTag}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-
-                  <div
-                    style={{
-                      fontSize: 12,
-                      opacity: 0.65,
-                      marginTop: 8,
-                      textAlign: "center",
-                    }}
-                  >
-                    (This history is saved at the time of the round and won’t
-                    change later.)
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Show:</div>
+                    <select
+                      value={historyLimit}
+                      onChange={(e) => setHistoryLimit(Number(e.target.value))}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #ccc",
+                      }}
+                    >
+                      <option value={5}>Last 5</option>
+                      <option value={10}>Last 10</option>
+                      <option value={25}>Last 25</option>
+                      <option value={1000}>All</option>
+                    </select>
                   </div>
                 </div>
-              ))}
+
+                {visibleHistory.map((r) => {
+                  const isOpen = !!expandedRoundIds[r.id];
+                  const playerCount = Array.isArray(r.entries)
+                    ? r.entries.length
+                    : 0;
+
+                  return (
+                    <div
+                      key={r.id}
+                      style={{
+                        border: "1px solid #dbe9ff",
+                        borderRadius: 10,
+                        padding: 12,
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: 10,
+                          cursor: "pointer",
+                        }}
+                        onClick={() => toggleRoundExpand(r.id)}
+                      >
+                        <div>
+                          <strong>{r.date}</strong>
+                          <div style={{ fontSize: 12, opacity: 0.7 }}>
+                            {playerCount} player{playerCount === 1 ? "" : "s"}
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleRoundExpand(r.id);
+                          }}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 8,
+                            border: "1px solid #ccc",
+                            background: "white",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {isOpen ? "Collapse" : "Expand"}
+                        </button>
+                      </div>
+
+                      {isOpen && (
+                        <>
+                          <div style={{ fontSize: 14, marginTop: 10 }}>
+                            {Array.isArray(r.entries) &&
+                              r.entries.map((e) => (
+                                <div
+                                  key={e.id}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    gap: 10,
+                                    padding: "6px 0",
+                                    borderBottom: "1px solid #eef5ff",
+                                  }}
+                                >
+                                  <div style={{ flex: 1 }}>
+                                    <strong>{e.name}</strong>
+                                  </div>
+                                  <div style={{ width: 80, textAlign: "right" }}>
+                                    score {e.score}
+                                  </div>
+                                  <div style={{ width: 140, textAlign: "right" }}>
+                                    #{e.oldTag} → #{e.newTag}
+                                  </div>
+                                </div>
+                              ))}
+                          </div>
+
+                          <div
+                            style={{
+                              fontSize: 12,
+                              opacity: 0.65,
+                              marginTop: 8,
+                              textAlign: "center",
+                            }}
+                          >
+                            (Saved at the time of the round and won’t change later.)
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
         )}
 
@@ -510,7 +622,10 @@ export default function App() {
               ))}
             </select>
 
-            <button onClick={() => adminAction(dropPlayerToLast)} style={{ margin: 4 }}>
+            <button
+              onClick={() => adminAction(dropPlayerToLast)}
+              style={{ margin: 4 }}
+            >
               Drop to Last
             </button>
           </div>
