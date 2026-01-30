@@ -399,7 +399,7 @@ export default function App() {
             ))}
           </ul>
 
-          <h3>Create Tag Round</h3>
+          <h3>Record Tag Round</h3>
           {sortedLeaderboard.map((p) => (
             <div key={p.id}>
               <label>
