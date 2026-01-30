@@ -3,7 +3,7 @@ import { db, ensureAnonAuth } from "./firebase";
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
-const ADMIN_PASSWORD = "pescado!";
+const ADMIN_PASSWORD = "ChangeThisToYourOwnPassword123!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
@@ -253,7 +253,6 @@ export default function App() {
     setRoundPlayers([]);
     setScores({});
 
-    // Keep UI tidy if the expanded round no longer exists
     setExpandedRoundIds((prev) => {
       const copy = { ...prev };
       delete copy[lastUser.id];
@@ -263,10 +262,12 @@ export default function App() {
 
   /**
    * ADMIN: Drop a selected player to the current highest tag (last place),
-   * WITHOUT editing Round History.
+   * rotating everyone below them up one spot.
    *
-   * Implementation: append a hidden "system round" with just two players
-   * that forces the target to lose, so the target receives the higher tag.
+   * This does NOT change Round History.
+   *
+   * Implementation: append a hidden "system round" with ALL affected players.
+   * Finish order is arranged so tags rotate upward and target receives the highest tag.
    */
   async function dropPlayerToLast() {
     if (!sortedLeaderboard.length) {
@@ -280,41 +281,43 @@ export default function App() {
       return;
     }
 
-    const target = sortedLeaderboard.find((p) => p.id === targetId);
-    if (!target) {
+    const ordered = [...sortedLeaderboard].sort((a, b) => a.tag - b.tag);
+
+    const targetIndex = ordered.findIndex((p) => p.id === targetId);
+    if (targetIndex === -1) {
       alert("Selected player not found.");
       return;
     }
 
-    // Find current last place (highest tag)
-    let last = null;
-    for (const p of sortedLeaderboard) {
-      if (!last || p.tag > last.tag) last = p;
-    }
-    if (!last) return;
-
-    if (last.id === target.id) {
-      alert(`${target.name} is already last (#${last.tag}).`);
+    // If already last, nothing to do
+    if (targetIndex === ordered.length - 1) {
+      alert(`${ordered[targetIndex].name} is already last (#${ordered[targetIndex].tag}).`);
       return;
     }
 
+    const target = ordered[targetIndex];
+    const last = ordered[ordered.length - 1];
+
     const ok = window.confirm(
-      `Drop ${target.name} (#${target.tag}) to last place (#${last.tag})?\n\nThis will NOT change Round History.`
+      `Drop ${target.name} (#${target.tag}) to last place (#${last.tag})?\n\nEveryone below them will move up one spot.\nRound History will NOT be changed.`
     );
     if (!ok) return;
 
-    // Hidden system round: last wins, target loses => target gets the higher tag
-    const sysRoundId = uid();
-    const sysDate = new Date().toLocaleString();
+    // Affected players are: target + everyone below them
+    const affected = ordered.slice(targetIndex); // includes target, ..., last
+
+    // Arrange finish order so tags rotate upward:
+    // finishOrder: affected[1], affected[2], ..., affected[last], affected[0]
+    const finishOrder = [...affected.slice(1), affected[0]];
 
     const sysRound = {
-      id: sysRoundId,
-      date: sysDate,
+      id: uid(),
+      date: new Date().toLocaleString(),
       system: true,
-      scores: [
-        { id: last.id, score: 1 }, // winner
-        { id: target.id, score: 2 }, // loser
-      ],
+      scores: finishOrder.map((p, i) => ({
+        id: p.id,
+        score: i + 1,
+      })),
     };
 
     await updateDoc(leagueRef, {
@@ -622,10 +625,7 @@ export default function App() {
               ))}
             </select>
 
-            <button
-              onClick={() => adminAction(dropPlayerToLast)}
-              style={{ margin: 4 }}
-            >
+            <button onClick={() => adminAction(dropPlayerToLast)} style={{ margin: 4 }}>
               Drop to Last
             </button>
           </div>
