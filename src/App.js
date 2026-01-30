@@ -470,7 +470,7 @@ export default function App() {
   }
 
   // ---------------------------
-  // DEFEND MODE (NEW UX)
+  // DEFEND MODE (cleaner UX)
   // ---------------------------
 
   function defendSummaryText(mode) {
@@ -1147,7 +1147,15 @@ export default function App() {
               textAlign: "left",
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 10,
+                flexWrap: "wrap",
+                alignItems: "center",
+              }}
+            >
               <div style={{ fontWeight: 900, color: COLORS.navy }}>
                 Defend Mode{" "}
                 {defend.enabled ? (
@@ -1214,7 +1222,9 @@ export default function App() {
                   </div>
                   <select
                     value={defend.scope || "podium"}
-                    onChange={(e) => setDefend({ ...defend, scope: e.target.value })}
+                    onChange={(e) =>
+                      setDefend({ ...defend, scope: e.target.value })
+                    }
                     style={{ ...inputStyle, width: 190, background: "#fff" }}
                   >
                     <option value="podium">Podium (tags 1–3)</option>
@@ -1237,7 +1247,13 @@ export default function App() {
 
                   {defend.durationType === "weeks" && (
                     <>
-                      <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                        }}
+                      >
                         Weeks
                       </div>
                       <input
@@ -1316,17 +1332,25 @@ export default function App() {
             )}
           </div>
 
-          <button
-            onClick={() => adminAction(deleteLastRound)}
-            style={{
-              ...smallButtonStyle,
-              background: COLORS.orange,
-              border: `1px solid ${COLORS.navy}`,
-            }}
-          >
-            Delete Last Round
-          </button>
+          {/* ✅ MOVED: Manual drop of expired holders directly under Defend Mode */}
+          <div style={{ marginTop: 14 }}>
+            <button
+              onClick={dropExpiredTagholdersToLast}
+              style={{
+                ...smallButtonStyle,
+                background: expiredCount ? COLORS.red : COLORS.orange,
+                color: expiredCount ? "white" : "#1a1a1a",
+                border: `1px solid ${COLORS.navy}`,
+                width: "100%",
+              }}
+              title="Drops all expired tagholders (in scope) to last, preserving their current order"
+            >
+              Drop Expired Tagholders to Last
+              {defend.enabled ? ` (${expiredCount} expired)` : ""}
+            </button>
+          </div>
 
+          {/* Drop Player to Last */}
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
               Drop Player to Last
@@ -1372,21 +1396,18 @@ export default function App() {
             </div>
           </div>
 
-          {/* Manual drop of expired holders */}
+          {/* ✅ MOVED: Delete Last Round now sits directly above Reset All Data */}
           <div style={{ marginTop: 14 }}>
             <button
-              onClick={dropExpiredTagholdersToLast}
+              onClick={() => adminAction(deleteLastRound)}
               style={{
                 ...smallButtonStyle,
-                background: expiredCount ? COLORS.red : COLORS.orange,
-                color: expiredCount ? "white" : "#1a1a1a",
+                background: COLORS.orange,
                 border: `1px solid ${COLORS.navy}`,
                 width: "100%",
               }}
-              title="Drops all expired tagholders (in scope) to last, preserving their current order"
             >
-              Drop Expired Tagholders to Last
-              {defend.enabled ? ` (${expiredCount} expired)` : ""}
+              Delete Last Round
             </button>
           </div>
 
@@ -1414,7 +1435,7 @@ export default function App() {
             color: "#666",
           }}
         >
-          Version 1.5 Developed by Eli Morgan
+          Version 1.6 Developed by Eli Morgan
         </div>
       </div>
     </div>
