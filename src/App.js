@@ -127,6 +127,9 @@ export default function App() {
     tagExpiresAt: {}, // {"1": epochMs, "2": epochMs, ...}
   });
 
+  // UI-only: hide/show settings area (when off: only shown after clicking Turn ON)
+  const [defendUIOpen, setDefendUIOpen] = useState(false);
+
   // local ticker for live countdown display
   const [tick, setTick] = useState(0);
 
@@ -463,78 +466,101 @@ export default function App() {
     setAdminDropPlayerId("");
     setHistoryExpanded(false);
     setExpandedRoundIds({});
+    setDefendUIOpen(false);
   }
 
   // ---------------------------
-  // DEFEND MODE ADMIN CONTROLS
+  // DEFEND MODE (NEW UX)
   // ---------------------------
 
-  async function setDefendEnabled(enabled) {
+  function defendSummaryText(mode) {
+    const scopeLabel =
+      mode.scope === "all" ? "All tags" : "Podium (tags 1–3)";
+    const durLabel =
+      mode.durationType === "testMinute"
+        ? "1 minute (test)"
+        : `${Number(mode.weeks || 2)} week(s)`;
+    return `${scopeLabel} • ${durLabel}`;
+  }
+
+  async function activateDefendMode() {
     await adminAction(async () => {
       const scope = defend.scope || "podium";
       const durationType = defend.durationType || "weeks";
       const weeks = Number(defend.weeks || 2);
+
       const durationMs =
         durationType === "testMinute" ? 60 * 1000 : weeksToMs(weeks);
 
-      let tagExpiresAt = {};
-      if (enabled) {
-        const scopeTags = getScopeTags(scope, sortedLeaderboard);
-        const deadline = nowMs() + durationMs;
-        scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
-      }
+      const scopeTags = getScopeTags(scope, sortedLeaderboard);
+      const deadline = nowMs() + durationMs;
+
+      const tagExpiresAt = {};
+      scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
 
       await updateDoc(leagueRef, {
         defendMode: {
-          enabled,
+          enabled: true,
           scope,
           durationType,
           weeks,
           tagExpiresAt,
         },
       });
+
+      setDefendUIOpen(false);
     });
   }
 
-  async function saveDefendSettings() {
+  async function applyDefendSettingsWhileActive() {
+    // When ACTIVE, applying settings is admin-protected and RESTARTS timers for tags in-scope.
     await adminAction(async () => {
       const scope = defend.scope || "podium";
       const durationType = defend.durationType || "weeks";
       const weeks = Number(defend.weeks || 2);
+
       const durationMs =
         durationType === "testMinute" ? 60 * 1000 : weeksToMs(weeks);
 
-      let tagExpiresAt = defend.tagExpiresAt || {};
+      const scopeTags = getScopeTags(scope, sortedLeaderboard);
+      const deadline = nowMs() + durationMs;
 
-      // If enabled, re-sync included tags to fresh duration (simple + predictable)
-      if (defend.enabled) {
-        const scopeTags = getScopeTags(scope, sortedLeaderboard);
-        const deadline = nowMs() + durationMs;
-        tagExpiresAt = { ...tagExpiresAt };
-        scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
-      }
+      const tagExpiresAt = { ...(defend.tagExpiresAt || {}) };
+      scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
 
       await updateDoc(leagueRef, {
         defendMode: {
           ...defend,
+          enabled: true,
           scope,
           durationType,
           weeks,
           tagExpiresAt,
         },
       });
+
+      setDefendUIOpen(false);
+    });
+  }
+
+  async function turnOffDefendMode() {
+    await adminAction(async () => {
+      await updateDoc(leagueRef, {
+        defendMode: {
+          ...defend,
+          enabled: false,
+          // keep settings saved for next time, but timers irrelevant while off
+        },
+      });
+      setDefendUIOpen(false);
     });
   }
 
   // ---------------------------
   // DROP EXPIRED TAGHOLDERS (MANUAL BUTTON)
-  // - Shows a confirmation list of who will move
-  // - Preserves original order among expired holders (stable)
-  // - Uses ONE system round to apply the reorder
   // ---------------------------
   async function dropExpiredTagholdersToLast() {
     await adminAction(async () => {
-      // Build the "who will move" list from the CURRENT UI snapshot
       if (!defend?.enabled) {
         alert("Defend Mode is OFF.");
         return;
@@ -554,8 +580,6 @@ export default function App() {
       }
 
       const expiredTagSet = new Set(expiredTagNums.map(Number));
-
-      // Snapshot order = current leaderboard order (sorted by tag ascending)
       const lbSnapshot = [...sortedLeaderboard].sort((a, b) => a.tag - b.tag);
 
       const expiredHolders = lbSnapshot.filter((row) =>
@@ -576,7 +600,6 @@ export default function App() {
       );
       if (!ok) return;
 
-      // Now do the authoritative write in a transaction
       await runTransaction(db, async (tx) => {
         const snap = await tx.get(leagueRef);
         if (!snap.exists()) return;
@@ -590,7 +613,6 @@ export default function App() {
           throw new Error("Defend Mode is OFF.");
         }
 
-        // Compute leaderboard from authoritative snapshot
         const lb = computeLeaderboard(p, r).sort((a, b) => a.tag - b.tag);
         if (lb.length < 2) return;
 
@@ -606,10 +628,8 @@ export default function App() {
 
         const expiredTagSet2 = new Set(expiredTagNums2.map(Number));
 
-        // Stable partition in snapshot order:
         const expiredPlayers = [];
         const nonExpiredPlayers = [];
-
         for (const row of lb) {
           if (expiredTagSet2.has(Number(row.tag))) expiredPlayers.push(row);
           else nonExpiredPlayers.push(row);
@@ -671,9 +691,7 @@ export default function App() {
 
   // Included tags for badges
   const includedTagsSet = new Set(
-    defend?.enabled
-      ? getScopeTags(defend.scope, sortedLeaderboard).map(String)
-      : []
+    defend?.enabled ? getScopeTags(defend.scope, sortedLeaderboard).map(String) : []
   );
 
   // Styling helpers
@@ -1118,7 +1136,7 @@ export default function App() {
             Admin Tools
           </div>
 
-          {/* DEFEND MODE */}
+          {/* DEFEND MODE (cleaner UX) */}
           <div
             style={{
               border: `1px solid ${COLORS.border}`,
@@ -1129,99 +1147,173 @@ export default function App() {
               textAlign: "left",
             }}
           >
-            <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
-              Defend Mode
-            </div>
-
-            <div style={{ fontSize: 12, opacity: 0.78, marginBottom: 10 }}>
-              Timers reset when a tag is <strong>in play</strong> (appears as an{" "}
-              <strong>oldTag</strong>) in a recorded round. Expired tags show as{" "}
-              <strong>EXPIRED</strong> until you manually drop them.
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: 10,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
-              <button
-                onClick={() => setDefendEnabled(!defend.enabled)}
-                style={{
-                  ...smallButtonStyle,
-                  background: defend.enabled ? COLORS.red : COLORS.green,
-                  color: "white",
-                  border: `1px solid ${
-                    defend.enabled ? COLORS.red : COLORS.green
-                  }`,
-                }}
-              >
-                {defend.enabled ? "Turn OFF" : "Turn ON"}
-              </button>
-
-              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
-                Scope
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                Defend Mode{" "}
+                {defend.enabled ? (
+                  <span style={{ color: COLORS.green }}>(ACTIVE)</span>
+                ) : (
+                  <span style={{ opacity: 0.6 }}>(OFF)</span>
+                )}
               </div>
-              <select
-                value={defend.scope || "podium"}
-                onChange={(e) => setDefend({ ...defend, scope: e.target.value })}
-                style={{ ...inputStyle, width: 190, background: "#fff" }}
-              >
-                <option value="podium">Podium (tags 1–3)</option>
-                <option value="all">All tags</option>
-              </select>
 
-              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
-                Duration
-              </div>
-              <select
-                value={defend.durationType || "weeks"}
-                onChange={(e) =>
-                  setDefend({ ...defend, durationType: e.target.value })
-                }
-                style={{ ...inputStyle, width: 180, background: "#fff" }}
-              >
-                <option value="testMinute">1 minute (test)</option>
-                <option value="weeks">Weeks</option>
-              </select>
-
-              {defend.durationType === "weeks" && (
-                <>
-                  <div
-                    style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}
-                  >
-                    Weeks
-                  </div>
-                  <input
-                    type="number"
-                    min={1}
-                    value={defend.weeks || 2}
-                    onChange={(e) =>
-                      setDefend({ ...defend, weeks: Number(e.target.value) })
-                    }
-                    style={{ ...inputStyle, width: 90 }}
-                  />
-                </>
+              {defend.enabled ? (
+                <button
+                  onClick={() => setDefendUIOpen((v) => !v)}
+                  style={{
+                    ...smallButtonStyle,
+                    background: COLORS.orange,
+                    border: `1px solid ${COLORS.navy}`,
+                  }}
+                >
+                  {defendUIOpen ? "Hide Settings" : "Change Settings"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setDefendUIOpen(true)}
+                  style={{
+                    ...smallButtonStyle,
+                    background: COLORS.green,
+                    color: "white",
+                    border: `1px solid ${COLORS.green}`,
+                  }}
+                >
+                  Turn ON
+                </button>
               )}
-
-              <button
-                onClick={saveDefendSettings}
-                style={{
-                  ...smallButtonStyle,
-                  background: COLORS.orange,
-                  border: `1px solid ${COLORS.navy}`,
-                }}
-              >
-                Save Settings
-              </button>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-              Currently expired tags (in scope):{" "}
-              <strong>{defend.enabled ? expiredCount : 0}</strong>
-            </div>
+            {/* Always show active summary when enabled */}
+            {defend.enabled && (
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+                Current settings: <strong>{defendSummaryText(defend)}</strong>
+                {" • "}
+                Expired (in scope): <strong>{expiredCount}</strong>
+              </div>
+            )}
+
+            {/* Settings area is hidden unless opened */}
+            {defendUIOpen && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, opacity: 0.78, marginBottom: 10 }}>
+                  Timers reset when a tag is <strong>in play</strong> (appears as an{" "}
+                  <strong>oldTag</strong>) in a recorded round. Expired tags show as{" "}
+                  <strong>EXPIRED</strong> until you manually drop them.
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 10,
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                    Scope
+                  </div>
+                  <select
+                    value={defend.scope || "podium"}
+                    onChange={(e) => setDefend({ ...defend, scope: e.target.value })}
+                    style={{ ...inputStyle, width: 190, background: "#fff" }}
+                  >
+                    <option value="podium">Podium (tags 1–3)</option>
+                    <option value="all">All tags</option>
+                  </select>
+
+                  <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                    Duration
+                  </div>
+                  <select
+                    value={defend.durationType || "weeks"}
+                    onChange={(e) =>
+                      setDefend({ ...defend, durationType: e.target.value })
+                    }
+                    style={{ ...inputStyle, width: 180, background: "#fff" }}
+                  >
+                    <option value="testMinute">1 minute (test)</option>
+                    <option value="weeks">Weeks</option>
+                  </select>
+
+                  {defend.durationType === "weeks" && (
+                    <>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                        Weeks
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        value={defend.weeks || 2}
+                        onChange={(e) =>
+                          setDefend({ ...defend, weeks: Number(e.target.value) })
+                        }
+                        style={{ ...inputStyle, width: 90 }}
+                      />
+                    </>
+                  )}
+
+                  {!defend.enabled ? (
+                    <>
+                      <button
+                        onClick={activateDefendMode}
+                        style={{
+                          ...smallButtonStyle,
+                          background: COLORS.green,
+                          color: "white",
+                          border: `1px solid ${COLORS.green}`,
+                        }}
+                        title="Saves settings + starts timers for tags in-scope"
+                      >
+                        Activate Defend Mode
+                      </button>
+
+                      <button
+                        onClick={() => setDefendUIOpen(false)}
+                        style={{
+                          ...smallButtonStyle,
+                          background: "#fff",
+                          border: `1px solid ${COLORS.border}`,
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={applyDefendSettingsWhileActive}
+                        style={{
+                          ...smallButtonStyle,
+                          background: COLORS.orange,
+                          border: `1px solid ${COLORS.navy}`,
+                        }}
+                        title="Applies settings and restarts timers for tags in-scope"
+                      >
+                        Apply (Restart Timers)
+                      </button>
+
+                      <button
+                        onClick={turnOffDefendMode}
+                        style={{
+                          ...smallButtonStyle,
+                          background: COLORS.red,
+                          color: "white",
+                          border: `1px solid ${COLORS.red}`,
+                        }}
+                      >
+                        Turn OFF
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {defend.enabled && (
+                  <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+                    Note: “Apply (Restart Timers)” will reset included tags to a fresh full timer.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <button
@@ -1322,7 +1414,7 @@ export default function App() {
             color: "#666",
           }}
         >
-          Version 1.4 Developed by Eli Morgan
+          Version 1.5 Developed by Eli Morgan
         </div>
       </div>
     </div>
