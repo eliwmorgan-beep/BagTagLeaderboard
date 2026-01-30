@@ -3,7 +3,7 @@ import { db, ensureAnonAuth } from "./firebase";
 import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
-const ADMIN_PASSWORD = "pescado!";
+const ADMIN_PASSWORD = "ChangeThisToYourOwnPassword123!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
@@ -49,9 +49,6 @@ function computeLeaderboard(players, rounds) {
 
 /**
  * Given the CURRENT leaderboard tags and a score list, compute the tag swaps for THIS round.
- * Returns:
- *  - roundDetailEntries: [{id,name,score,oldTag,newTag}]
- *  - nextTagMap: { playerId -> newTag } for participants
  */
 function computeRoundSwaps(currentLeaderboard, scoreList) {
   const tagById = {};
@@ -65,7 +62,6 @@ function computeRoundSwaps(currentLeaderboard, scoreList) {
     }))
     .filter((x) => typeof x.oldTag === "number" && !Number.isNaN(x.score));
 
-  // lowest score wins
   const finishOrder = [...participants].sort((a, b) => a.score - b.score);
   const tags = finishOrder.map((p) => p.oldTag).sort((a, b) => a - b);
 
@@ -79,10 +75,10 @@ function computeRoundSwaps(currentLeaderboard, scoreList) {
 
 export default function App() {
   const [players, setPlayers] = useState([]); // {id, name, startTag}
-  const [rounds, setRounds] = useState([]); // [{id, date, scores:[{id,score}]}]
+  const [rounds, setRounds] = useState([]); // [{id, date, scores:[{id,score}], system?:true}]
   const [roundHistory, setRoundHistory] = useState([]); // [{id,date,entries:[{id,name,score,oldTag,newTag}]}]
 
-  const [leaderboard, setLeaderboard] = useState([]); // derived
+  const [leaderboard, setLeaderboard] = useState([]);
 
   // Round entry UI
   const [roundPlayers, setRoundPlayers] = useState([]);
@@ -92,7 +88,7 @@ export default function App() {
   const [name, setName] = useState("");
   const [tag, setTag] = useState("");
 
-  // Admin UI (dropdown selection for "Drop Player to Last")
+  // Admin UI dropdown
   const [adminDropPlayerId, setAdminDropPlayerId] = useState("");
 
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
@@ -133,6 +129,8 @@ export default function App() {
     if (!exists) setAdminDropPlayerId("");
   }, [leaderboard, adminDropPlayerId]);
 
+  const sortedLeaderboard = [...leaderboard].sort((a, b) => a.tag - b.tag);
+
   async function addPlayer() {
     if (!name || !tag) return;
 
@@ -142,7 +140,7 @@ export default function App() {
       return;
     }
 
-    if (leaderboard.some((p) => p.tag === startTag)) {
+    if (sortedLeaderboard.some((p) => p.tag === startTag)) {
       alert("That tag is already taken.");
       return;
     }
@@ -178,11 +176,13 @@ export default function App() {
     }
 
     // Compute swaps based on CURRENT leaderboard right now
-    const { finishOrder, nextTagMap } = computeRoundSwaps(leaderboard, scoreList);
+    const { finishOrder, nextTagMap } = computeRoundSwaps(
+      sortedLeaderboard,
+      scoreList
+    );
 
-    // Build a detailed history entry that will NEVER change later
     const nameById = {};
-    leaderboard.forEach((p) => (nameById[p.id] = p.name));
+    sortedLeaderboard.forEach((p) => (nameById[p.id] = p.name));
 
     const entries = finishOrder.map((p) => ({
       id: p.id,
@@ -216,23 +216,29 @@ export default function App() {
     await action();
   }
 
+  /**
+   * Delete LAST USER round (the last item in Round History),
+   * and also remove its matching round from the rounds array so the leaderboard updates.
+   * This ignores any hidden system/admin rounds.
+   */
   async function deleteLastRound() {
-    if (!rounds.length) {
-      alert("No rounds to delete.");
+    if (!roundHistory.length) {
+      alert("No user rounds to delete.");
       return;
     }
 
-    const lastHistory = roundHistory[roundHistory.length - 1];
-    const lastRound = rounds[rounds.length - 1];
-
+    const lastUser = roundHistory[roundHistory.length - 1];
     const ok = window.confirm(
-      `Delete the last round from ${lastRound?.date || "unknown date"}?\n\nThis will remove it from Round History and update everyone's tags.`
+      `Delete the last submitted round from ${lastUser.date}?\n\nThis will remove it from Round History and update everyone's tags.`
     );
     if (!ok) return;
 
+    const newRoundHistory = roundHistory.slice(0, -1);
+    const newRounds = rounds.filter((r) => r.id !== lastUser.id);
+
     await updateDoc(leagueRef, {
-      rounds: rounds.slice(0, -1),
-      roundHistory: roundHistory.slice(0, -1),
+      roundHistory: newRoundHistory,
+      rounds: newRounds,
     });
 
     setRoundPlayers([]);
@@ -240,12 +246,14 @@ export default function App() {
   }
 
   /**
-   * ADMIN: Drop a player to last (highest tag) WITHOUT deleting rounds.
-   * ONE-TIME change: updates players' baseline startTag so it won't reapply later.
-   * Round History is NOT changed (as requested).
+   * ADMIN: Drop a selected player to the current highest tag (last place),
+   * WITHOUT editing Round History.
+   *
+   * Implementation: append a hidden "system round" with just two players
+   * that forces the target to lose, so the target receives the higher tag.
    */
   async function dropPlayerToLast() {
-    if (!leaderboard.length) {
+    if (!sortedLeaderboard.length) {
       alert("No players yet.");
       return;
     }
@@ -256,15 +264,15 @@ export default function App() {
       return;
     }
 
-    const target = leaderboard.find((p) => p.id === targetId);
+    const target = sortedLeaderboard.find((p) => p.id === targetId);
     if (!target) {
       alert("Selected player not found.");
       return;
     }
 
-    // Find last-place (highest tag)
+    // Find current last place (highest tag)
     let last = null;
-    for (const p of leaderboard) {
+    for (const p of sortedLeaderboard) {
       if (!last || p.tag > last.tag) last = p;
     }
     if (!last) return;
@@ -275,26 +283,28 @@ export default function App() {
     }
 
     const ok = window.confirm(
-      `Drop ${target.name} (#${target.tag}) to last place (#${last.tag})?\n\nRounds and Round History will NOT be edited.`
+      `Drop ${target.name} (#${target.tag}) to last place (#${last.tag})?\n\nThis will NOT change Round History.`
     );
     if (!ok) return;
 
-    // Build a tag map from CURRENT tags
-    const tagMap = {};
-    leaderboard.forEach((p) => (tagMap[p.id] = p.tag));
+    // Hidden system round: last wins, target loses => target gets the higher tag
+    const sysRoundId = uid();
+    const sysDate = new Date().toLocaleString();
 
-    // Swap target with last to keep tags unique
-    const temp = tagMap[target.id];
-    tagMap[target.id] = tagMap[last.id];
-    tagMap[last.id] = temp;
+    const sysRound = {
+      id: sysRoundId,
+      date: sysDate,
+      system: true,
+      scores: [
+        { id: last.id, score: 1 }, // winner
+        { id: target.id, score: 2 }, // loser
+      ],
+    };
 
-    // Write new baseline tags back into players.startTag
-    const newPlayers = players.map((p) => ({
-      ...p,
-      startTag: tagMap[p.id],
-    }));
-
-    await updateDoc(leagueRef, { players: newPlayers });
+    await updateDoc(leagueRef, {
+      rounds: [...rounds, sysRound],
+      // roundHistory unchanged on purpose
+    });
 
     setAdminDropPlayerId("");
   }
@@ -313,8 +323,6 @@ export default function App() {
     setTag("");
     setAdminDropPlayerId("");
   }
-
-  const sortedLeaderboard = [...leaderboard].sort((a, b) => a.tag - b.tag);
 
   return (
     <div
@@ -378,7 +386,6 @@ export default function App() {
           Finalize Round
         </button>
 
-        {/* Add Player moved to bottom above Round History/Admin Tools */}
         <h3 style={{ marginTop: 24 }}>Add Player</h3>
         <input
           placeholder="Name"
@@ -449,8 +456,16 @@ export default function App() {
                       ))}
                   </div>
 
-                  <div style={{ fontSize: 12, opacity: 0.65, marginTop: 8, textAlign: "center" }}>
-                    (This history is saved at the time of the round and won’t change later.)
+                  <div
+                    style={{
+                      fontSize: 12,
+                      opacity: 0.65,
+                      marginTop: 8,
+                      textAlign: "center",
+                    }}
+                  >
+                    (This history is saved at the time of the round and won’t
+                    change later.)
                   </div>
                 </div>
               ))}
