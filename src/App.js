@@ -1,12 +1,43 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { db, ensureAnonAuth } from "./firebase";
-import { doc, getDoc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+  runTransaction,
+} from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function weeksToMs(weeks) {
+  return Number(weeks) * 7 * 24 * 60 * 60 * 1000;
+}
+
+function formatTimeLeft(deadlineMs) {
+  const diff = Math.max(0, Number(deadlineMs || 0) - nowMs());
+
+  // If less than 1 day, show mm:ss (better for 1-minute test)
+  if (diff < 24 * 60 * 60 * 1000) {
+    const totalSec = Math.ceil(diff / 1000);
+    const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+    const ss = String(totalSec % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  }
+
+  // Otherwise show days
+  const days = Math.ceil(diff / (24 * 60 * 60 * 1000));
+  return `${days}d`;
 }
 
 /**
@@ -73,12 +104,31 @@ function computeRoundSwaps(currentLeaderboard, scoreList) {
   return { finishOrder, nextTagMap };
 }
 
+function getScopeTags(scope, sortedLeaderboard) {
+  if (scope === "podium") return [1, 2, 3];
+  const maxTag = sortedLeaderboard.reduce((m, p) => Math.max(m, p.tag), 0);
+  const tags = [];
+  for (let t = 1; t <= maxTag; t++) tags.push(t);
+  return tags;
+}
+
 export default function App() {
   const [players, setPlayers] = useState([]); // {id, name, startTag}
   const [rounds, setRounds] = useState([]); // [{id, date, scores:[{id,score}], system?:true}]
   const [roundHistory, setRoundHistory] = useState([]); // [{id,date,entries:[...], comment?:string}]
-
   const [leaderboard, setLeaderboard] = useState([]);
+
+  // Defend Mode stored in Firestore
+  const [defend, setDefend] = useState({
+    enabled: false,
+    scope: "podium", // "podium" | "all"
+    durationType: "weeks", // "weeks" | "testMinute"
+    weeks: 2,
+    tagExpiresAt: {}, // {"1": epochMs, "2": epochMs, ...}
+  });
+
+  // local ticker for live countdown display
+  const [tick, setTick] = useState(0);
 
   // Round entry UI
   const [roundPlayers, setRoundPlayers] = useState([]);
@@ -99,14 +149,13 @@ export default function App() {
 
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
 
-  // --- Color palette pulled from your logo vibe ---
+  // --- Palette / look ---
   const COLORS = {
-    navy: "#1b1f5a", // dark outer ring vibe
-    blue: "#0ea5e9", // splash blue
-    blueLight: "#e6f3ff", // background wash
-    orange: "#f4a83a", // ring orange
-    green: "#15803d", // ring green
-    red: "#cc0000", // accent red (mouth / splash)
+    navy: "#1b1f5a",
+    blueLight: "#e6f3ff",
+    orange: "#f4a83a",
+    green: "#15803d",
+    red: "#cc0000",
     text: "#0b1220",
     border: "#dbe9ff",
     panel: "#ffffff",
@@ -122,7 +171,18 @@ export default function App() {
 
       const first = await getDoc(leagueRef);
       if (!first.exists()) {
-        await setDoc(leagueRef, { players: [], rounds: [], roundHistory: [] });
+        await setDoc(leagueRef, {
+          players: [],
+          rounds: [],
+          roundHistory: [],
+          defendMode: {
+            enabled: false,
+            scope: "podium",
+            durationType: "weeks",
+            weeks: 2,
+            tagExpiresAt: {},
+          },
+        });
       }
 
       unsub = onSnapshot(leagueRef, (snap) => {
@@ -130,17 +190,30 @@ export default function App() {
         const p = data.players || [];
         const r = data.rounds || [];
         const rh = data.roundHistory || [];
+        const dm = data.defendMode || {
+          enabled: false,
+          scope: "podium",
+          durationType: "weeks",
+          weeks: 2,
+          tagExpiresAt: {},
+        };
 
         setPlayers(p);
         setRounds(r);
         setRoundHistory(rh);
-
+        setDefend(dm);
         setLeaderboard(computeLeaderboard(p, r));
       });
     })().catch(console.error);
 
     return () => unsub();
   }, [leagueRef]);
+
+  // live UI timer tick (for countdown display)
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Keep dropdown selection valid as players change
   useEffect(() => {
@@ -150,6 +223,20 @@ export default function App() {
   }, [leaderboard, adminDropPlayerId]);
 
   const sortedLeaderboard = [...leaderboard].sort((a, b) => a.tag - b.tag);
+
+  function getDurationMs(mode) {
+    if (mode.durationType === "testMinute") return 60 * 1000;
+    return weeksToMs(mode.weeks || 2);
+  }
+
+  async function adminAction(action) {
+    const pw = window.prompt("Admin password:");
+    if (pw !== ADMIN_PASSWORD) {
+      alert("Wrong password.");
+      return;
+    }
+    await action();
+  }
 
   async function addPlayer() {
     if (!name || !tag) return;
@@ -195,6 +282,7 @@ export default function App() {
       return;
     }
 
+    // Compute swaps based on CURRENT leaderboard right now
     const { finishOrder, nextTagMap } = computeRoundSwaps(
       sortedLeaderboard,
       scoreList
@@ -215,7 +303,10 @@ export default function App() {
     const date = new Date().toLocaleString();
     const trimmedComment = (roundComment || "").trim();
 
+    // rounds array is only used for leaderboard math; keep it score-only
     const newRound = { id: roundId, date, scores: scoreList };
+
+    // roundHistory is for display; store comment here
     const newRoundHistoryItem = {
       id: roundId,
       date,
@@ -223,26 +314,39 @@ export default function App() {
       comment: trimmedComment ? trimmedComment : "",
     };
 
+    // DEFEND MODE: reset timers for tags that were IN PLAY (oldTag)
+    let newDefendMode = defend;
+    if (defend?.enabled) {
+      const durationMs = getDurationMs(defend);
+      const included = new Set(
+        getScopeTags(defend.scope, sortedLeaderboard).map(String)
+      );
+
+      const oldTagsInRound = new Set(entries.map((e) => String(e.oldTag)));
+      const tagExpiresAt = { ...(defend.tagExpiresAt || {}) };
+
+      oldTagsInRound.forEach((t) => {
+        if (included.has(t)) {
+          tagExpiresAt[t] = nowMs() + durationMs;
+        }
+      });
+
+      newDefendMode = { ...defend, tagExpiresAt };
+    }
+
     await updateDoc(leagueRef, {
       rounds: [...rounds, newRound],
       roundHistory: [...roundHistory, newRoundHistoryItem],
+      defendMode: newDefendMode,
     });
 
     setRoundPlayers([]);
     setScores({});
     setRoundComment("");
 
+    // Nice UX: open history and expand the newest round
     setHistoryExpanded(true);
     setExpandedRoundIds((prev) => ({ ...prev, [roundId]: true }));
-  }
-
-  async function adminAction(action) {
-    const pw = window.prompt("Admin password:");
-    if (pw !== ADMIN_PASSWORD) {
-      alert("Wrong password.");
-      return;
-    }
-    await action();
   }
 
   async function deleteLastRound() {
@@ -318,6 +422,7 @@ export default function App() {
       id: uid(),
       date: new Date().toLocaleString(),
       system: true,
+      reason: "Admin drop-to-last",
       scores: finishOrder.map((p, i) => ({
         id: p.id,
         score: i + 1,
@@ -337,7 +442,18 @@ export default function App() {
     );
     if (!ok) return;
 
-    await updateDoc(leagueRef, { players: [], rounds: [], roundHistory: [] });
+    await updateDoc(leagueRef, {
+      players: [],
+      rounds: [],
+      roundHistory: [],
+      defendMode: {
+        enabled: false,
+        scope: "podium",
+        durationType: "weeks",
+        weeks: 2,
+        tagExpiresAt: {},
+      },
+    });
 
     setRoundPlayers([]);
     setScores({});
@@ -349,6 +465,201 @@ export default function App() {
     setExpandedRoundIds({});
   }
 
+  // ---------------------------
+  // DEFEND MODE ADMIN CONTROLS
+  // ---------------------------
+
+  async function setDefendEnabled(enabled) {
+    await adminAction(async () => {
+      const scope = defend.scope || "podium";
+      const durationType = defend.durationType || "weeks";
+      const weeks = Number(defend.weeks || 2);
+      const durationMs =
+        durationType === "testMinute" ? 60 * 1000 : weeksToMs(weeks);
+
+      let tagExpiresAt = {};
+      if (enabled) {
+        const scopeTags = getScopeTags(scope, sortedLeaderboard);
+        const deadline = nowMs() + durationMs;
+        scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
+      }
+
+      await updateDoc(leagueRef, {
+        defendMode: {
+          enabled,
+          scope,
+          durationType,
+          weeks,
+          tagExpiresAt,
+        },
+      });
+    });
+  }
+
+  async function saveDefendSettings() {
+    await adminAction(async () => {
+      const scope = defend.scope || "podium";
+      const durationType = defend.durationType || "weeks";
+      const weeks = Number(defend.weeks || 2);
+      const durationMs =
+        durationType === "testMinute" ? 60 * 1000 : weeksToMs(weeks);
+
+      let tagExpiresAt = defend.tagExpiresAt || {};
+
+      // If enabled, re-sync included tags to fresh duration (simple + predictable)
+      if (defend.enabled) {
+        const scopeTags = getScopeTags(scope, sortedLeaderboard);
+        const deadline = nowMs() + durationMs;
+        tagExpiresAt = { ...tagExpiresAt };
+        scopeTags.forEach((t) => (tagExpiresAt[String(t)] = deadline));
+      }
+
+      await updateDoc(leagueRef, {
+        defendMode: {
+          ...defend,
+          scope,
+          durationType,
+          weeks,
+          tagExpiresAt,
+        },
+      });
+    });
+  }
+
+  // ---------------------------
+  // DROP EXPIRED TAGHOLDERS (MANUAL BUTTON)
+  // - Shows a confirmation list of who will move
+  // - Preserves original order among expired holders (stable)
+  // - Uses ONE system round to apply the reorder
+  // ---------------------------
+  async function dropExpiredTagholdersToLast() {
+    await adminAction(async () => {
+      // Build the "who will move" list from the CURRENT UI snapshot
+      if (!defend?.enabled) {
+        alert("Defend Mode is OFF.");
+        return;
+      }
+
+      const scopeTags = getScopeTags(defend.scope, sortedLeaderboard).map(String);
+      const expiresAt = defend.tagExpiresAt || {};
+
+      const expiredTagNums = scopeTags.filter((t) => {
+        const d = Number(expiresAt[t] || 0);
+        return d > 0 && nowMs() >= d;
+      });
+
+      if (!expiredTagNums.length) {
+        alert("No expired tagholders right now.");
+        return;
+      }
+
+      const expiredTagSet = new Set(expiredTagNums.map(Number));
+
+      // Snapshot order = current leaderboard order (sorted by tag ascending)
+      const lbSnapshot = [...sortedLeaderboard].sort((a, b) => a.tag - b.tag);
+
+      const expiredHolders = lbSnapshot.filter((row) =>
+        expiredTagSet.has(Number(row.tag))
+      );
+
+      if (!expiredHolders.length) {
+        alert("No expired tagholders right now.");
+        return;
+      }
+
+      const listText = expiredHolders
+        .map((p) => `#${p.tag} — ${p.name}`)
+        .join("\n");
+
+      const ok = window.confirm(
+        `Drop expired tagholders to last?\n\nThe following will be moved:\n${listText}\n\nThis will preserve their current order.\nContinue?`
+      );
+      if (!ok) return;
+
+      // Now do the authoritative write in a transaction
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(leagueRef);
+        if (!snap.exists()) return;
+
+        const data = snap.data() || {};
+        const p = data.players || [];
+        const r = data.rounds || [];
+        const dm = data.defendMode || defend;
+
+        if (!dm.enabled) {
+          throw new Error("Defend Mode is OFF.");
+        }
+
+        // Compute leaderboard from authoritative snapshot
+        const lb = computeLeaderboard(p, r).sort((a, b) => a.tag - b.tag);
+        if (lb.length < 2) return;
+
+        const scopeTags2 = getScopeTags(dm.scope || "podium", lb).map(String);
+        const expiresAt2 = dm.tagExpiresAt || {};
+
+        const expiredTagNums2 = scopeTags2.filter((t) => {
+          const d = Number(expiresAt2[t] || 0);
+          return d > 0 && nowMs() >= d;
+        });
+
+        if (!expiredTagNums2.length) return;
+
+        const expiredTagSet2 = new Set(expiredTagNums2.map(Number));
+
+        // Stable partition in snapshot order:
+        const expiredPlayers = [];
+        const nonExpiredPlayers = [];
+
+        for (const row of lb) {
+          if (expiredTagSet2.has(Number(row.tag))) expiredPlayers.push(row);
+          else nonExpiredPlayers.push(row);
+        }
+
+        if (!expiredPlayers.length) return;
+
+        const desiredOrder = [...nonExpiredPlayers, ...expiredPlayers];
+
+        const sysRound = {
+          id: uid(),
+          date: new Date().toLocaleString(),
+          system: true,
+          reason: `Defend Mode: dropped expired tagholders (${expiredTagNums2.join(
+            ", "
+          )})`,
+          scores: desiredOrder.map((pl, i) => ({
+            id: pl.id,
+            score: i + 1,
+          })),
+        };
+
+        // Reset timers for the tag numbers that expired
+        const durationMs =
+          (dm.durationType || "weeks") === "testMinute"
+            ? 60 * 1000
+            : weeksToMs(dm.weeks || 2);
+
+        const newExpiresAt = { ...(expiresAt2 || {}) };
+        const newDeadline = nowMs() + durationMs;
+        expiredTagNums2.forEach((t) => {
+          newExpiresAt[String(t)] = newDeadline;
+        });
+
+        tx.update(leagueRef, {
+          rounds: [...r, sysRound],
+          defendMode: { ...dm, tagExpiresAt: newExpiresAt },
+        });
+      });
+    }).catch((e) => {
+      const msg = String(e?.message || e);
+      if (msg.includes("Defend Mode is OFF")) alert("Defend Mode is OFF.");
+      else {
+        console.error(e);
+        alert("Could not drop expired tagholders. Check console.");
+      }
+    });
+  }
+
+  // Round history helpers
   const visibleHistory = [...roundHistory]
     .slice()
     .reverse()
@@ -358,6 +669,14 @@ export default function App() {
     setExpandedRoundIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
+  // Included tags for badges
+  const includedTagsSet = new Set(
+    defend?.enabled
+      ? getScopeTags(defend.scope, sortedLeaderboard).map(String)
+      : []
+  );
+
+  // Styling helpers
   const inputStyle = {
     padding: "10px 12px",
     borderRadius: 12,
@@ -372,15 +691,25 @@ export default function App() {
     border: `1px solid ${COLORS.border}`,
     background: COLORS.orange,
     color: "#1a1a1a",
-    fontWeight: 700,
+    fontWeight: 800,
     cursor: "pointer",
   };
 
   const smallButtonStyle = {
     ...buttonStyle,
     padding: "8px 12px",
-    fontWeight: 700,
   };
+
+  // how many are currently expired (for UI hint)
+  const expiredCount = (() => {
+    if (!defend?.enabled) return 0;
+    const scopeTags = getScopeTags(defend.scope, sortedLeaderboard).map(String);
+    const expiresAt = defend.tagExpiresAt || {};
+    return scopeTags.filter((t) => {
+      const d = Number(expiresAt[t] || 0);
+      return d > 0 && nowMs() >= d;
+    }).length;
+  })();
 
   return (
     <div
@@ -403,7 +732,6 @@ export default function App() {
             boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
           }}
         >
-          {/* LOGO */}
           <img
             src="/pescado-logo.png"
             alt="Pescado Mojado logo"
@@ -421,35 +749,63 @@ export default function App() {
           <h1 style={{ color: COLORS.navy, marginBottom: 4 }}>
             Pescado Mojado
           </h1>
-          <div style={{ color: COLORS.green, marginBottom: 18, fontWeight: 700 }}>
+          <div style={{ color: COLORS.green, marginBottom: 18, fontWeight: 800 }}>
             Bag Tag Leaderboard
           </div>
 
           {/* LEADERBOARD */}
           <h3 style={{ color: COLORS.navy, marginTop: 0 }}>Leaderboard</h3>
           <ul style={{ listStyle: "none", padding: 0, marginTop: 10 }}>
-            {sortedLeaderboard.map((p) => (
-              <li
-                key={p.id}
-                style={{
-                  background: COLORS.soft,
-                  border: `1px solid ${COLORS.border}`,
-                  borderRadius: 14,
-                  padding: "10px 12px",
-                  marginBottom: 8,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <span style={{ fontWeight: 800, color: COLORS.navy }}>
-                  #{p.tag}
-                </span>
-                <span style={{ color: COLORS.text, fontWeight: 600 }}>
-                  {p.name}
-                </span>
-              </li>
-            ))}
+            {sortedLeaderboard.map((p) => {
+              const tagStr = String(p.tag);
+              const showDefend = defend?.enabled && includedTagsSet.has(tagStr);
+              const deadline = Number(defend?.tagExpiresAt?.[tagStr] || 0);
+              const isExpired = showDefend && deadline > 0 && nowMs() >= deadline;
+
+              return (
+                <li
+                  key={p.id}
+                  style={{
+                    background: COLORS.soft,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: 14,
+                    padding: "10px 12px",
+                    marginBottom: 8,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 10,
+                  }}
+                >
+                  <span style={{ fontWeight: 900, color: COLORS.navy }}>
+                    #{p.tag}
+                  </span>
+
+                  <span style={{ color: COLORS.text, fontWeight: 700, flex: 1 }}>
+                    {p.name}
+                  </span>
+
+                  {showDefend && (
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 900,
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: `1px solid ${COLORS.navy}`,
+                        background: isExpired ? COLORS.red : COLORS.orange,
+                        color: isExpired ? "white" : "#1a1a1a",
+                        whiteSpace: "nowrap",
+                      }}
+                      title="Defend Mode countdown (resets when this tag appears in a recorded round)"
+                    >
+                      {isExpired ? "EXPIRED" : `${formatTimeLeft(deadline)} left`}
+                      <span style={{ display: "none" }}>{tick}</span>
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
 
           {/* RECORD ROUND */}
@@ -473,7 +829,7 @@ export default function App() {
                     checked={roundPlayers.includes(p.id)}
                     onChange={() => toggleRoundPlayer(p.id)}
                   />
-                  <span style={{ fontWeight: 700, color: COLORS.text }}>
+                  <span style={{ fontWeight: 800, color: COLORS.text }}>
                     {p.name}
                   </span>
                   <span style={{ color: COLORS.navy, opacity: 0.9 }}>
@@ -516,7 +872,10 @@ export default function App() {
               />
             </div>
 
-            <button onClick={finalizeRound} style={{ ...buttonStyle, width: "100%", marginTop: 10 }}>
+            <button
+              onClick={finalizeRound}
+              style={{ ...buttonStyle, width: "100%", marginTop: 10 }}
+            >
               Finalize Round
             </button>
           </div>
@@ -545,13 +904,22 @@ export default function App() {
               onChange={(e) => setTag(e.target.value)}
               style={{ ...inputStyle, width: 120 }}
             />
-            <button onClick={addPlayer} style={{ ...buttonStyle, background: COLORS.green, color: "white" }}>
+            <button
+              onClick={addPlayer}
+              style={{ ...buttonStyle, background: COLORS.green, color: "white" }}
+            >
               Add
             </button>
           </div>
 
           {/* ROUND HISTORY */}
-          <hr style={{ margin: "26px 0", border: 0, borderTop: `2px solid ${COLORS.border}` }} />
+          <hr
+            style={{
+              margin: "26px 0",
+              border: 0,
+              borderTop: `2px solid ${COLORS.border}`,
+            }}
+          />
 
           <button
             onClick={() => setHistoryExpanded((v) => !v)}
@@ -583,7 +951,7 @@ export default function App() {
                       flexWrap: "wrap",
                     }}
                   >
-                    <div style={{ fontWeight: 800, color: COLORS.navy }}>
+                    <div style={{ fontWeight: 900, color: COLORS.navy }}>
                       Round History
                     </div>
 
@@ -609,7 +977,9 @@ export default function App() {
 
                   {visibleHistory.map((r) => {
                     const isOpen = !!expandedRoundIds[r.id];
-                    const playerCount = Array.isArray(r.entries) ? r.entries.length : 0;
+                    const playerCount = Array.isArray(r.entries)
+                      ? r.entries.length
+                      : 0;
 
                     return (
                       <div
@@ -668,10 +1038,18 @@ export default function App() {
                                   fontSize: 14,
                                 }}
                               >
-                                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 4 }}>
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    opacity: 0.75,
+                                    marginBottom: 4,
+                                  }}
+                                >
                                   Comment
                                 </div>
-                                <div style={{ whiteSpace: "pre-wrap" }}>{r.comment}</div>
+                                <div style={{ whiteSpace: "pre-wrap" }}>
+                                  {r.comment}
+                                </div>
                               </div>
                             ) : null}
 
@@ -685,16 +1063,23 @@ export default function App() {
                                       justifyContent: "space-between",
                                       gap: 10,
                                       padding: "8px 0",
-                                      borderBottom: "1px solid rgba(0,0,0,0.06)",
+                                      borderBottom:
+                                        "1px solid rgba(0,0,0,0.06)",
                                     }}
                                   >
-                                    <div style={{ flex: 1, fontWeight: 700 }}>
+                                    <div style={{ flex: 1, fontWeight: 800 }}>
                                       {e.name}
                                     </div>
                                     <div style={{ width: 90, textAlign: "right" }}>
                                       score {e.score}
                                     </div>
-                                    <div style={{ width: 150, textAlign: "right", color: COLORS.navy }}>
+                                    <div
+                                      style={{
+                                        width: 150,
+                                        textAlign: "right",
+                                        color: COLORS.navy,
+                                      }}
+                                    >
                                       #{e.oldTag} → #{e.newTag}
                                     </div>
                                   </div>
@@ -722,12 +1107,131 @@ export default function App() {
           )}
 
           {/* ADMIN TOOLS */}
-          <hr style={{ margin: "26px 0", border: 0, borderTop: `2px solid ${COLORS.border}` }} />
-          <div style={{ color: COLORS.red, marginBottom: 8, fontWeight: 800 }}>
+          <hr
+            style={{
+              margin: "26px 0",
+              border: 0,
+              borderTop: `2px solid ${COLORS.border}`,
+            }}
+          />
+          <div style={{ color: COLORS.red, marginBottom: 8, fontWeight: 900 }}>
             Admin Tools
           </div>
 
-          <button onClick={() => adminAction(deleteLastRound)} style={{ ...smallButtonStyle, background: COLORS.orange, border: `1px solid ${COLORS.navy}` }}>
+          {/* DEFEND MODE */}
+          <div
+            style={{
+              border: `1px solid ${COLORS.border}`,
+              background: "#fff",
+              borderRadius: 14,
+              padding: 12,
+              marginBottom: 12,
+              textAlign: "left",
+            }}
+          >
+            <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
+              Defend Mode
+            </div>
+
+            <div style={{ fontSize: 12, opacity: 0.78, marginBottom: 10 }}>
+              Timers reset when a tag is <strong>in play</strong> (appears as an{" "}
+              <strong>oldTag</strong>) in a recorded round. Expired tags show as{" "}
+              <strong>EXPIRED</strong> until you manually drop them.
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+                flexWrap: "wrap",
+                alignItems: "center",
+              }}
+            >
+              <button
+                onClick={() => setDefendEnabled(!defend.enabled)}
+                style={{
+                  ...smallButtonStyle,
+                  background: defend.enabled ? COLORS.red : COLORS.green,
+                  color: "white",
+                  border: `1px solid ${
+                    defend.enabled ? COLORS.red : COLORS.green
+                  }`,
+                }}
+              >
+                {defend.enabled ? "Turn OFF" : "Turn ON"}
+              </button>
+
+              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                Scope
+              </div>
+              <select
+                value={defend.scope || "podium"}
+                onChange={(e) => setDefend({ ...defend, scope: e.target.value })}
+                style={{ ...inputStyle, width: 190, background: "#fff" }}
+              >
+                <option value="podium">Podium (tags 1–3)</option>
+                <option value="all">All tags</option>
+              </select>
+
+              <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
+                Duration
+              </div>
+              <select
+                value={defend.durationType || "weeks"}
+                onChange={(e) =>
+                  setDefend({ ...defend, durationType: e.target.value })
+                }
+                style={{ ...inputStyle, width: 180, background: "#fff" }}
+              >
+                <option value="testMinute">1 minute (test)</option>
+                <option value="weeks">Weeks</option>
+              </select>
+
+              {defend.durationType === "weeks" && (
+                <>
+                  <div
+                    style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}
+                  >
+                    Weeks
+                  </div>
+                  <input
+                    type="number"
+                    min={1}
+                    value={defend.weeks || 2}
+                    onChange={(e) =>
+                      setDefend({ ...defend, weeks: Number(e.target.value) })
+                    }
+                    style={{ ...inputStyle, width: 90 }}
+                  />
+                </>
+              )}
+
+              <button
+                onClick={saveDefendSettings}
+                style={{
+                  ...smallButtonStyle,
+                  background: COLORS.orange,
+                  border: `1px solid ${COLORS.navy}`,
+                }}
+              >
+                Save Settings
+              </button>
+            </div>
+
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+              Currently expired tags (in scope):{" "}
+              <strong>{defend.enabled ? expiredCount : 0}</strong>
+            </div>
+          </div>
+
+          <button
+            onClick={() => adminAction(deleteLastRound)}
+            style={{
+              ...smallButtonStyle,
+              background: COLORS.orange,
+              border: `1px solid ${COLORS.navy}`,
+            }}
+          >
             Delete Last Round
           </button>
 
@@ -764,21 +1268,49 @@ export default function App() {
 
               <button
                 onClick={() => adminAction(dropPlayerToLast)}
-                style={{ ...smallButtonStyle, background: COLORS.navy, color: "white", border: `1px solid ${COLORS.navy}` }}
+                style={{
+                  ...smallButtonStyle,
+                  background: COLORS.navy,
+                  color: "white",
+                  border: `1px solid ${COLORS.navy}`,
+                }}
               >
                 Drop to Last
               </button>
             </div>
           </div>
 
-          <div style={{ marginTop: 10 }}>
+          {/* Manual drop of expired holders */}
+          <div style={{ marginTop: 14 }}>
             <button
-              onClick={() => adminAction(resetAll)}
-              style={{ ...smallButtonStyle, background: COLORS.red, color: "white", border: `1px solid ${COLORS.red}` }}
+              onClick={dropExpiredTagholdersToLast}
+              style={{
+                ...smallButtonStyle,
+                background: expiredCount ? COLORS.red : COLORS.orange,
+                color: expiredCount ? "white" : "#1a1a1a",
+                border: `1px solid ${COLORS.navy}`,
+                width: "100%",
+              }}
+              title="Drops all expired tagholders (in scope) to last, preserving their current order"
             >
-              Reset All Data
+              Drop Expired Tagholders to Last
+              {defend.enabled ? ` (${expiredCount} expired)` : ""}
             </button>
           </div>
+
+          <button
+            onClick={() => adminAction(resetAll)}
+            style={{
+              ...smallButtonStyle,
+              background: COLORS.red,
+              color: "white",
+              border: `1px solid ${COLORS.red}`,
+              width: "100%",
+              marginTop: 10,
+            }}
+          >
+            Reset All Data
+          </button>
         </div>
 
         {/* FOOTER */}
@@ -787,10 +1319,10 @@ export default function App() {
             marginTop: 14,
             textAlign: "center",
             fontSize: 12,
-            color: "rgba(27,31,90,0.70)",
+            color: "#666",
           }}
         >
-          Version 1.3.1 Developed by Eli Morgan
+          Version 1.4 Developed by Eli Morgan
         </div>
       </div>
     </div>
