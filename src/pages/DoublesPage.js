@@ -58,8 +58,10 @@ export default function DoublesPage() {
   const [checkinName, setCheckinName] = useState("");
   const [checkinPool, setCheckinPool] = useState("A");
 
-  // Player-checkin “start round” feedback
+  // ✅ Start Round password + feedback (UI-based, no prompt)
+  const [startPw, setStartPw] = useState("");
   const [startRoundMsg, setStartRoundMsg] = useState("");
+  const [startRoundMsgColor, setStartRoundMsgColor] = useState(COLORS.muted);
 
   // Admin settings UI
   const [formatChoice, setFormatChoice] = useState("random"); // "random" | "seated"
@@ -165,16 +167,6 @@ export default function DoublesPage() {
     return { fmtLabel, caliLabel };
   }, [doubles]);
 
-  // ✅ password prompt wrapper (ONLY used for the red start button)
-  async function requireAdmin(fn) {
-    const pw = window.prompt("Admin password:");
-    if (pw !== ADMIN_PASSWORD) {
-      alert("Wrong password.");
-      return;
-    }
-    return fn();
-  }
-
   async function saveAdminSettings() {
     if (!adminUnlocked) return;
     await updateDoc(leagueRef, {
@@ -214,9 +206,8 @@ export default function DoublesPage() {
   }
 
   function pickCali(checkinsList, fmt, mode, manualId) {
-    if (checkinsList.length % 2 === 0) {
+    if (checkinsList.length % 2 === 0)
       return { caliId: "", remaining: [...checkinsList] };
-    }
 
     if (fmt === "seated") {
       const A = checkinsList.filter((p) => p.pool === "A");
@@ -225,26 +216,28 @@ export default function DoublesPage() {
       const poolList = checkinsList.filter((p) => p.pool === oddPool);
 
       let chosen = null;
-      if (mode === "manual" && manualId) {
+      if (mode === "manual" && manualId)
         chosen = poolList.find((p) => p.id === manualId) || null;
-      }
       if (!chosen) chosen = shuffle(poolList)[0] || null;
       if (!chosen) return { caliId: "", remaining: [...checkinsList] };
 
-      const remaining = checkinsList.filter((p) => p.id !== chosen.id);
-      return { caliId: chosen.id, remaining };
+      return {
+        caliId: chosen.id,
+        remaining: checkinsList.filter((p) => p.id !== chosen.id),
+      };
     }
 
     // random
     let chosen = null;
-    if (mode === "manual" && manualId) {
+    if (mode === "manual" && manualId)
       chosen = checkinsList.find((p) => p.id === manualId) || null;
-    }
     if (!chosen) chosen = shuffle(checkinsList)[0] || null;
     if (!chosen) return { caliId: "", remaining: [...checkinsList] };
 
-    const remaining = checkinsList.filter((p) => p.id !== chosen.id);
-    return { caliId: chosen.id, remaining };
+    return {
+      caliId: chosen.id,
+      remaining: checkinsList.filter((p) => p.id !== chosen.id),
+    };
   }
 
   function buildTeamsAndCards(checkinsList, fmt, caliInfo) {
@@ -308,6 +301,7 @@ export default function DoublesPage() {
       }
     }
 
+    // build cards: 2 teams per card, hole gap of 2
     const cardTeams = [...teams];
     const cardsOut = [];
     let startHole = 1;
@@ -321,11 +315,7 @@ export default function DoublesPage() {
     while (cardTeams.length >= 2) {
       const t1 = cardTeams.shift();
       const t2 = cardTeams.shift();
-      cardsOut.push({
-        id: uid(),
-        startHole: nextStartHole(),
-        teams: [t1, t2],
-      });
+      cardsOut.push({ id: uid(), startHole: nextStartHole(), teams: [t1, t2] });
     }
 
     if (cardTeams.length === 1 && cardsOut.length > 0) {
@@ -335,7 +325,6 @@ export default function DoublesPage() {
     let cali = { playerId: "", teammateId: "" };
     if (caliPlayer) {
       cali.playerId = caliPlayer.id;
-
       const caliTeam = {
         id: uid(),
         type: "cali",
@@ -347,10 +336,7 @@ export default function DoublesPage() {
           },
         ],
       };
-
-      if (cardsOut.length > 0) {
-        cardsOut[0].teams.push(caliTeam);
-      }
+      if (cardsOut.length > 0) cardsOut[0].teams.push(caliTeam);
     }
 
     return { cardsOut, cali };
@@ -370,57 +356,65 @@ export default function DoublesPage() {
     return names.join(", ");
   }
 
-  // ✅ internal “start round” logic (no admin gate here; we gate it at click time via requireAdmin)
-  async function makeTeamsAndCardsInternal() {
-    // show immediate feedback so it never feels like “nothing”
-    setStartRoundMsg("Creating teams & cards…");
+  // ✅ This is the FIXED “Make Teams & Cards” handler
+  async function handleStartRound() {
+    setStartRoundMsg("");
+    setStartRoundMsgColor(COLORS.muted);
+
+    if (startPw !== ADMIN_PASSWORD) {
+      setStartRoundMsgColor(COLORS.red);
+      setStartRoundMsg("Wrong admin password.");
+      return;
+    }
 
     if (started) {
+      setStartRoundMsgColor(COLORS.red);
       setStartRoundMsg("Round already started.");
-      alert("Round already started.");
       return;
     }
 
     if (checkins.length < 4) {
-      const msg = "Need at least 4 players checked in to start doubles.";
-      setStartRoundMsg(msg);
-      alert(msg);
+      setStartRoundMsgColor(COLORS.red);
+      setStartRoundMsg("Need at least 4 players checked in to start doubles.");
       return;
     }
 
-    // IMPORTANT: in your current design, the admin chooses settings in Admin section.
-    // We use the local UI values (formatChoice/caliMode/manualCaliId/layoutNote) when starting.
-    const fmt = formatChoice;
-    const mode = caliMode;
-    const manualId = mode === "manual" ? manualCaliId : "";
+    try {
+      setStartRoundMsgColor(COLORS.muted);
+      setStartRoundMsg("Creating teams & cards…");
 
-    const caliInfo = pickCali(checkins, fmt, mode, manualId);
-    const built = buildTeamsAndCards(checkins, fmt, caliInfo);
+      // Use the current admin settings values
+      const fmt = formatChoice;
+      const mode = caliMode;
+      const manualId = mode === "manual" ? manualCaliId : "";
 
-    await updateDoc(leagueRef, {
-      "doubles.started": true,
-      "doubles.format": fmt,
-      "doubles.caliMode": mode,
-      "doubles.manualCaliId": mode === "manual" ? manualId : "",
-      "doubles.layoutNote": layoutNote || "",
-      "doubles.cali": built.cali,
-      "doubles.cards": built.cardsOut,
-      "doubles.submissions": {},
-      "doubles.leaderboard": [],
-      "doubles.updatedAt": Date.now(),
-    });
+      const caliInfo = pickCali(checkins, fmt, mode, manualId);
+      const built = buildTeamsAndCards(checkins, fmt, caliInfo);
 
-    const ok = "✅ Teams & cards created. Cards are now available.";
-    setStartRoundMsg(ok);
-    alert(ok);
+      await updateDoc(leagueRef, {
+        "doubles.started": true,
+        "doubles.format": fmt,
+        "doubles.caliMode": mode,
+        "doubles.manualCaliId": mode === "manual" ? manualId : "",
+        "doubles.layoutNote": layoutNote || "",
+        "doubles.cali": built.cali,
+        "doubles.cards": built.cardsOut,
+        "doubles.submissions": {},
+        "doubles.leaderboard": [],
+        "doubles.updatedAt": Date.now(),
+      });
 
-    setTodayExpanded(false);
-    setCheckinExpanded(false);
-  }
-
-  // ✅ this is the click handler for the RED button in Player Check-in (password protected)
-  async function handleStartRound() {
-    await requireAdmin(makeTeamsAndCardsInternal);
+      setStartRoundMsgColor(COLORS.green);
+      setStartRoundMsg("✅ Teams & cards created. Cards are now available.");
+      setStartPw("");
+      setTodayExpanded(false);
+      setCheckinExpanded(false);
+    } catch (err) {
+      setStartRoundMsgColor(COLORS.red);
+      setStartRoundMsg(
+        `❌ Failed to start round: ${err?.message || String(err)}`
+      );
+    }
   }
 
   async function eraseDoublesInfo() {
@@ -437,6 +431,7 @@ export default function DoublesPage() {
     setLateMsg("");
     setLateName("");
     setCheckinName("");
+    setStartPw("");
     setStartRoundMsg("");
     setAdminExpanded(false);
     setAdminUnlocked(false);
@@ -771,26 +766,15 @@ export default function DoublesPage() {
                   Check In
                 </button>
 
-                {checkins.length > 0 ? (
-                  <div
-                    style={{ marginTop: 6, fontSize: 13, color: COLORS.muted }}
-                  >
-                    Checked in:{" "}
-                    {checkins
-                      .slice(-12)
-                      .map((p) => p.name)
-                      .join(", ")}
-                    {checkins.length > 12 ? "…" : ""}
-                  </div>
-                ) : (
-                  <div
-                    style={{ marginTop: 6, fontSize: 13, color: COLORS.muted }}
-                  >
-                    Add players as they arrive.
-                  </div>
-                )}
+                {/* ✅ password input + start round button (no prompt) */}
+                <input
+                  style={input}
+                  type="password"
+                  placeholder="Admin password to start round"
+                  value={startPw}
+                  onChange={(e) => setStartPw(e.target.value)}
+                />
 
-                {/* ✅ RED “Make Teams & Cards” (password protected; never silent) */}
                 <button
                   style={{
                     padding: "14px 18px",
@@ -800,21 +784,14 @@ export default function DoublesPage() {
                     color: "white",
                     fontWeight: 1000,
                     cursor: "pointer",
-                    marginTop: 6,
                   }}
                   onClick={handleStartRound}
-                  disabled={checkins.length < 4}
-                  title={
-                    checkins.length < 4
-                      ? "Need at least 4 players checked in"
-                      : ""
-                  }
                 >
                   Make Teams & Cards (Admin)
                 </button>
 
                 {!!startRoundMsg && (
-                  <div style={{ fontWeight: 900, color: COLORS.green }}>
+                  <div style={{ fontWeight: 900, color: startRoundMsgColor }}>
                     {startRoundMsg}
                   </div>
                 )}
@@ -907,17 +884,6 @@ export default function DoublesPage() {
                               <div style={{ fontWeight: 1000 }}>
                                 {teamDisplay(t)}
                               </div>
-                              {isSeated && (
-                                <div
-                                  style={{ fontSize: 12, color: COLORS.muted }}
-                                >
-                                  {(t.players || [])
-                                    .map((p) =>
-                                      p.pool ? `${p.name} (${p.pool})` : p.name
-                                    )
-                                    .join(" • ")}
-                                </div>
-                              )}
                             </div>
                           ))}
                         </div>
@@ -945,10 +911,6 @@ export default function DoublesPage() {
                                 }))
                               }
                             />
-                            <div style={{ fontSize: 12, color: COLORS.muted }}>
-                              Allowed: -18 to +18
-                            </div>
-
                             <button
                               style={button(true)}
                               onClick={() => submitCardScore(c.id)}
@@ -958,11 +920,7 @@ export default function DoublesPage() {
 
                             {!!submitMsgByCard[c.id] && (
                               <div
-                                style={{
-                                  fontWeight: 900,
-                                  color: COLORS.green,
-                                  marginTop: 4,
-                                }}
+                                style={{ fontWeight: 900, color: COLORS.green }}
                               >
                                 {submitMsgByCard[c.id]}
                               </div>
@@ -1022,7 +980,7 @@ export default function DoublesPage() {
           </div>
         )}
 
-        {/* 5) Admin (bottom) */}
+        {/* 5) Admin */}
         <div style={{ marginTop: 14, ...cardStyle }}>
           <div
             style={sectionTitleRow}
@@ -1059,7 +1017,6 @@ export default function DoublesPage() {
                 </div>
               ) : (
                 <>
-                  {/* Settings */}
                   <div style={{ ...cardStyle, padding: 12 }}>
                     <div style={{ fontWeight: 1000, color: COLORS.navy }}>
                       Settings
@@ -1129,28 +1086,21 @@ export default function DoublesPage() {
                       </div>
 
                       {caliMode === "manual" && (
-                        <div style={{ display: "grid", gap: 8 }}>
-                          <div style={{ fontSize: 12, color: COLORS.muted }}>
-                            Only used if there is an odd number of checked-in
-                            players. (For seated doubles, selection should come
-                            from the odd pool.)
-                          </div>
-                          <select
-                            style={input}
-                            value={manualCaliId}
-                            onChange={(e) => setManualCaliId(e.target.value)}
-                          >
-                            <option value="">
-                              Select Cali player (optional)
+                        <select
+                          style={input}
+                          value={manualCaliId}
+                          onChange={(e) => setManualCaliId(e.target.value)}
+                        >
+                          <option value="">
+                            Select Cali player (optional)
+                          </option>
+                          {checkins.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                              {p.pool ? ` (${p.pool})` : ""}
                             </option>
-                            {checkins.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.name}
-                                {p.pool ? ` (${p.pool})` : ""}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                          ))}
+                        </select>
                       )}
 
                       <textarea
@@ -1166,82 +1116,6 @@ export default function DoublesPage() {
                     </div>
                   </div>
 
-                  {/* Late player */}
-                  {started && (
-                    <div style={{ ...cardStyle, padding: 12 }}>
-                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                        Add Late Player
-                      </div>
-                      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                        <input
-                          style={input}
-                          placeholder="Late player name"
-                          value={lateName}
-                          onChange={(e) => setLateName(e.target.value)}
-                        />
-
-                        {isSeated && (
-                          <div style={{ display: "flex", gap: 10 }}>
-                            <button
-                              style={{
-                                ...button(latePool === "A"),
-                                flex: 1,
-                                background:
-                                  latePool === "A" ? COLORS.orange : "#fff",
-                              }}
-                              onClick={() => setLatePool("A")}
-                            >
-                              Pool A
-                            </button>
-                            <button
-                              style={{
-                                ...button(latePool === "B"),
-                                flex: 1,
-                                background:
-                                  latePool === "B" ? COLORS.orange : "#fff",
-                              }}
-                              onClick={() => setLatePool("B")}
-                            >
-                              Pool B
-                            </button>
-                          </div>
-                        )}
-
-                        <div style={{ display: "grid", gap: 6 }}>
-                          <div style={{ fontSize: 12, color: COLORS.muted }}>
-                            If there’s an unpaired Cali already on a card, the
-                            late player becomes their teammate. Otherwise, the
-                            late player is added as a Cali on the selected card.
-                          </div>
-
-                          <select
-                            style={input}
-                            value={lateCardId}
-                            onChange={(e) => setLateCardId(e.target.value)}
-                          >
-                            <option value="">Select card…</option>
-                            {cards.map((c, i) => (
-                              <option key={c.id} value={c.id}>
-                                Card {i + 1} (Start Hole {c.startHole})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <button style={button(true)} onClick={addLatePlayer}>
-                          Add Late Player
-                        </button>
-
-                        {!!lateMsg && (
-                          <div style={{ fontWeight: 900, color: COLORS.green }}>
-                            {lateMsg}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Edit holes */}
                   {started && cards.length > 0 && (
                     <div style={{ ...cardStyle, padding: 12 }}>
                       <div style={{ fontWeight: 1000, color: COLORS.navy }}>
@@ -1269,8 +1143,8 @@ export default function DoublesPage() {
                               key={c.id}
                               style={{
                                 display: "flex",
-                                alignItems: "center",
                                 gap: 10,
+                                alignItems: "center",
                               }}
                             >
                               <div style={{ width: 120, fontWeight: 900 }}>
@@ -1311,29 +1185,14 @@ export default function DoublesPage() {
                     </div>
                   )}
 
-                  {/* Bottom big buttons (NO “Make Teams & Cards” here anymore) */}
                   <div
                     style={{
                       display: "flex",
                       gap: 12,
                       flexWrap: "wrap",
                       justifyContent: "center",
-                      marginTop: 4,
                     }}
                   >
-                    <button
-                      style={bigAdminButton(false)}
-                      onClick={() => {
-                        const init = {};
-                        cards.forEach((c) => (init[c.id] = c.startHole));
-                        setHoleEdits(init);
-                        setEditHolesOpen(true);
-                      }}
-                      disabled={!started || cards.length === 0}
-                    >
-                      Edit Starting Holes
-                    </button>
-
                     <button
                       style={bigAdminButton(true)}
                       onClick={eraseDoublesInfo}
