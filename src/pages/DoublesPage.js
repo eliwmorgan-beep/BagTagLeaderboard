@@ -56,6 +56,7 @@ export default function DoublesPage() {
 
   // UI state
   const [todayExpanded, setTodayExpanded] = useState(true);
+  const [checkinExpanded, setCheckinExpanded] = useState(true);
   const [adminExpanded, setAdminExpanded] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [adminPw, setAdminPw] = useState("");
@@ -83,7 +84,6 @@ export default function DoublesPage() {
   const [lateName, setLateName] = useState("");
   const [latePool, setLatePool] = useState("A");
   const [lateCardId, setLateCardId] = useState("");
-  const [lateAction, setLateAction] = useState("auto"); // auto behavior described below
   const [lateMsg, setLateMsg] = useState("");
 
   // Ensure baseline shape
@@ -126,7 +126,7 @@ export default function DoublesPage() {
         setDoubles(d);
         setLoading(false);
 
-        // keep admin UI synced (only when not unlocked OR first load)
+        // keep admin UI synced
         setFormatChoice(d.format || "random");
         setCaliMode(d.caliMode || "random");
         setManualCaliId(d.manualCaliId || "");
@@ -140,7 +140,7 @@ export default function DoublesPage() {
       () => setLoading(false)
     );
     return () => unsub();
-  }, [leagueRef, defaultDoubles]);
+  }, [leagueRef, defaultDoubles, lateCardId]);
 
   const isSeated = (doubles?.format || "random") === "seated";
   const started = !!doubles?.started;
@@ -169,6 +169,15 @@ export default function DoublesPage() {
     return { fmtLabel, caliLabel };
   }, [doubles]);
 
+  async function requireAdmin(fn) {
+    const pw = window.prompt("Admin password:");
+    if (pw !== ADMIN_PASSWORD) {
+      alert("Wrong password.");
+      return;
+    }
+    return fn();
+  }
+
   async function saveAdminSettings() {
     if (!adminUnlocked) return;
     await updateDoc(leagueRef, {
@@ -184,7 +193,6 @@ export default function DoublesPage() {
     const name = checkinName.trim();
     if (!name) return;
 
-    // prevent duplicates by name (soft)
     const exists = checkins.some(
       (p) => (p.name || "").toLowerCase() === name.toLowerCase()
     );
@@ -209,7 +217,6 @@ export default function DoublesPage() {
   }
 
   function pickCali(checkinsList, fmt, mode, manualId) {
-    // Returns {caliId, checkinsRemaining}
     if (checkinsList.length % 2 === 0) {
       return { caliId: "", remaining: [...checkinsList] };
     }
@@ -218,7 +225,6 @@ export default function DoublesPage() {
       const A = checkinsList.filter((p) => p.pool === "A");
       const B = checkinsList.filter((p) => p.pool === "B");
 
-      // Determine which pool is odd (or fallback)
       const oddPool = A.length % 2 === 1 ? "A" : B.length % 2 === 1 ? "B" : "A";
       const poolList = checkinsList.filter((p) => p.pool === oddPool);
 
@@ -226,16 +232,14 @@ export default function DoublesPage() {
       if (mode === "manual" && manualId) {
         chosen = poolList.find((p) => p.id === manualId) || null;
       }
-      if (!chosen) {
-        chosen = shuffle(poolList)[0] || null;
-      }
+      if (!chosen) chosen = shuffle(poolList)[0] || null;
       if (!chosen) return { caliId: "", remaining: [...checkinsList] };
 
       const remaining = checkinsList.filter((p) => p.id !== chosen.id);
       return { caliId: chosen.id, remaining };
     }
 
-    // Random Doubles
+    // random
     let chosen = null;
     if (mode === "manual" && manualId) {
       chosen = checkinsList.find((p) => p.id === manualId) || null;
@@ -248,8 +252,6 @@ export default function DoublesPage() {
   }
 
   function buildTeamsAndCards(checkinsList, fmt, caliInfo) {
-    // fmt: "random" | "seated"
-    // caliInfo: { caliId, remaining }
     const remaining = [...caliInfo.remaining];
     const caliId = caliInfo.caliId;
 
@@ -266,9 +268,8 @@ export default function DoublesPage() {
       const Bs = shuffle(B);
 
       for (let i = 0; i < min; i++) {
-        const tId = uid();
         teams.push({
-          id: tId,
+          id: uid(),
           type: "doubles",
           players: [
             { id: As[i].id, name: As[i].name, pool: "A" },
@@ -277,11 +278,7 @@ export default function DoublesPage() {
         });
       }
 
-      // if mismatched pools (should only happen if admin didn't balance),
-      // push leftovers as singles to be handled by cali or regrouping.
       const leftover = [...As.slice(min), ...Bs.slice(min)];
-      // If there are leftovers, we will try to pack them into teams of 2 (randomly),
-      // but still keep a playable card structure.
       const leftoverShuffled = shuffle(leftover);
       for (let i = 0; i + 1 < leftoverShuffled.length; i += 2) {
         teams.push({
@@ -315,47 +312,34 @@ export default function DoublesPage() {
       }
     }
 
-    // Build cards:
-    // - Standard: 2 teams per card (4 players)
-    // - If cali exists: add cali as a third "team" (solo) to the first card => 5 players, 3 teams
-    // - Never allow a card with only 1 team.
-    // If we end up with an odd number of teams (shouldn't, but just in case), we merge last team into previous card.
     const cardTeams = [...teams];
     const cardsOut = [];
     let startHole = 1;
 
     function nextStartHole() {
       const h = startHole;
-      startHole += 2; // hole gap
+      startHole += 2;
       return h;
     }
 
     while (cardTeams.length >= 2) {
-      const cId = uid();
       const t1 = cardTeams.shift();
       const t2 = cardTeams.shift();
       cardsOut.push({
-        id: cId,
+        id: uid(),
         startHole: nextStartHole(),
         teams: [t1, t2],
       });
     }
 
-    // If a leftover team exists, merge into last card (making it 3 teams / 6 players)
-    if (cardTeams.length === 1) {
-      const lone = cardTeams[0];
-      if (cardsOut.length === 0) {
-        // can't create a single-team card; ignore (shouldn't happen)
-      } else {
-        cardsOut[cardsOut.length - 1].teams.push(lone);
-      }
+    if (cardTeams.length === 1 && cardsOut.length > 0) {
+      cardsOut[cardsOut.length - 1].teams.push(cardTeams[0]);
     }
 
-    // Add Cali if needed
     let cali = { playerId: "", teammateId: "" };
     if (caliPlayer) {
       cali.playerId = caliPlayer.id;
-      cali.teammateId = ""; // can be filled by late player
+
       const caliTeam = {
         id: uid(),
         type: "cali",
@@ -368,10 +352,7 @@ export default function DoublesPage() {
         ],
       };
 
-      if (cardsOut.length === 0) {
-        // Not enough teams to make cards; still store cali selection.
-      } else {
-        // Put Cali on the first card as a third team (5 players total)
+      if (cardsOut.length > 0) {
         cardsOut[0].teams.push(caliTeam);
       }
     }
@@ -395,9 +376,8 @@ export default function DoublesPage() {
 
   async function makeTeamsAndCards() {
     if (!adminUnlocked) return;
-    if (checkins.length < 4) return; // need at least 4 for a normal doubles card
+    if (checkins.length < 4) return;
 
-    // Save admin settings first so everyone sees it
     await saveAdminSettings();
 
     const fmt = formatChoice;
@@ -407,7 +387,6 @@ export default function DoublesPage() {
     const caliInfo = pickCali(checkins, fmt, mode, manualId);
     const built = buildTeamsAndCards(checkins, fmt, caliInfo);
 
-    // Leaderboard clears for a new start
     await updateDoc(leagueRef, {
       "doubles.started": true,
       "doubles.format": fmt,
@@ -421,8 +400,8 @@ export default function DoublesPage() {
       "doubles.updatedAt": Date.now(),
     });
 
-    // Collapse Today section after start
     setTodayExpanded(false);
+    setCheckinExpanded(false);
   }
 
   async function eraseDoublesInfo() {
@@ -431,12 +410,16 @@ export default function DoublesPage() {
       doubles: defaultDoubles,
       "doubles.updatedAt": Date.now(),
     });
+
     setExpandedCardId(null);
     setScoreDraftByCard({});
     setSubmitMsgByCard({});
     setHoleEdits({});
     setLateMsg("");
     setLateName("");
+    setCheckinName("");
+    setAdminExpanded(false);
+    setAdminUnlocked(false);
   }
 
   async function submitCardScore(cardId) {
@@ -446,7 +429,6 @@ export default function DoublesPage() {
     const card = cards.find((c) => c.id === cardId);
     if (!card) return;
 
-    // Add/update leaderboard entries for each team on the card
     const newEntries = (card.teams || []).map((t) => ({
       teamId: t.id,
       teamName: t.type === "cali" ? "Cali" : "Team",
@@ -454,7 +436,6 @@ export default function DoublesPage() {
       score,
     }));
 
-    // merge into existing leaderboard by teamId
     const existing = [...leaderboard];
     const byId = new Map(existing.map((e) => [e.teamId, e]));
     for (const e of newEntries) byId.set(e.teamId, e);
@@ -484,8 +465,7 @@ export default function DoublesPage() {
     if (!adminUnlocked) return;
     const updatedCards = cards.map((c) => {
       const proposed = holeEdits[c.id];
-      if (proposed === undefined || proposed === null || proposed === "")
-        return c;
+      if (proposed === undefined || proposed === null || proposed === "") return c;
       const val = clamp(parseInt(proposed, 10) || c.startHole, 1, 18);
       return { ...c, startHole: val };
     });
@@ -498,11 +478,9 @@ export default function DoublesPage() {
   }
 
   function findOpenCaliTeam(cardsList) {
-    // cali team is type="cali". If it has 1 player only, it's "open".
     for (const c of cardsList) {
       const t = (c.teams || []).find((x) => x.type === "cali");
-      if (t && (t.players || []).length === 1)
-        return { cardId: c.id, teamId: t.id };
+      if (t && (t.players || []).length === 1) return { cardId: c.id, teamId: t.id };
     }
     return null;
   }
@@ -514,7 +492,6 @@ export default function DoublesPage() {
     const name = lateName.trim();
     if (!name) return;
 
-    // add to checkins
     const already = checkins.some(
       (p) => (p.name || "").toLowerCase() === name.toLowerCase()
     );
@@ -533,7 +510,6 @@ export default function DoublesPage() {
 
     const newCheckins = [...checkins, newPlayer];
 
-    // If there is a cali solo (open), make them teammates (cali becomes 2-person team)
     const openCali = findOpenCaliTeam(cards);
     let newCards = [...cards];
 
@@ -568,10 +544,8 @@ export default function DoublesPage() {
       return;
     }
 
-    // Otherwise, admin chooses a card and the late player becomes a Cali solo on that card.
     const targetId = lateCardId || (cards[0] ? cards[0].id : "");
     if (!targetId) {
-      // No cards exist; just add to checkins
       await updateDoc(leagueRef, {
         "doubles.checkins": newCheckins,
         "doubles.updatedAt": Date.now(),
@@ -581,18 +555,14 @@ export default function DoublesPage() {
       return;
     }
 
-    // Add a cali team to the chosen card (or if it already has 3 teams, append anyway)
     const caliTeam = {
       id: uid(),
       type: "cali",
-      players: [
-        { id: newPlayer.id, name: newPlayer.name, pool: newPlayer.pool },
-      ],
+      players: [{ id: newPlayer.id, name: newPlayer.name, pool: newPlayer.pool }],
     };
 
     newCards = cards.map((c) => {
       if (c.id !== targetId) return c;
-      // If a cali team already exists but has 2 players, we still add as another cali solo (rare case)
       return { ...c, teams: [...(c.teams || []), caliTeam] };
     });
 
@@ -683,12 +653,9 @@ export default function DoublesPage() {
       <div style={container}>
         <Header />
 
-        {/* Today's Format (expandable) */}
+        {/* 1) Today's Format */}
         <div style={{ marginTop: 14, ...cardStyle }}>
-          <div
-            style={sectionTitleRow}
-            onClick={() => setTodayExpanded((v) => !v)}
-          >
+          <div style={sectionTitleRow} onClick={() => setTodayExpanded((v) => !v)}>
             <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
               Today’s Format
             </div>
@@ -713,122 +680,82 @@ export default function DoublesPage() {
                   <b>Check-in:</b> {checkinStatus}
                 </div>
               </div>
-
-              {/* Player Check-in card (only before round starts) */}
-              {!started && (
-                <div style={{ ...cardStyle, padding: 12 }}>
-                  <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                    Player Check-in
-                  </div>
-
-                  <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                    <input
-                      style={input}
-                      placeholder="Player name"
-                      value={checkinName}
-                      onChange={(e) => setCheckinName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") addCheckin();
-                      }}
-                    />
-
-                    {isSeated && (
-                      <div style={{ display: "flex", gap: 10 }}>
-                        <button
-                          style={{
-                            ...button(checkinPool === "A"),
-                            flex: 1,
-                            background:
-                              checkinPool === "A" ? COLORS.orange : "#fff",
-                          }}
-                          onClick={() => setCheckinPool("A")}
-                        >
-                          Pool A
-                        </button>
-                        <button
-                          style={{
-                            ...button(checkinPool === "B"),
-                            flex: 1,
-                            background:
-                              checkinPool === "B" ? COLORS.orange : "#fff",
-                          }}
-                          onClick={() => setCheckinPool("B")}
-                        >
-                          Pool B
-                        </button>
-                      </div>
-                    )}
-
-                    <button style={button(true)} onClick={addCheckin}>
-                      Check In
-                    </button>
-
-                    {checkins.length > 0 && (
-                      <div
-                        style={{
-                          marginTop: 6,
-                          fontSize: 13,
-                          color: COLORS.muted,
-                        }}
-                      >
-                        Checked in:{" "}
-                        {checkins
-                          .slice(-12)
-                          .map((p) => p.name)
-                          .join(", ")}
-                        {checkins.length > 12 ? "…" : ""}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
 
-        {/* Leaderboard */}
-        <div style={{ marginTop: 14, ...cardStyle }}>
-          <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
-            Leaderboard
-          </div>
-
-          {leaderboard.length === 0 ? (
-            <div style={{ marginTop: 10, color: COLORS.muted }}>
-              No scores yet.
+        {/* 2) Player Check-in (own section; disappears after start) */}
+        {!started && (
+          <div style={{ marginTop: 14, ...cardStyle }}>
+            <div
+              style={sectionTitleRow}
+              onClick={() => setCheckinExpanded((v) => !v)}
+            >
+              <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
+                Player Check-in
+              </div>
+              <div style={{ color: COLORS.muted, fontWeight: 800 }}>
+                {checkinExpanded ? "Hide" : "Show"}
+              </div>
             </div>
-          ) : (
-            <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-              {leaderboard.map((e) => (
-                <div
-                  key={e.teamId}
-                  style={{
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 14,
-                    padding: 12,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 12,
-                    alignItems: "center",
+
+            {checkinExpanded && (
+              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                <input
+                  style={input}
+                  placeholder="Player name"
+                  value={checkinName}
+                  onChange={(e) => setCheckinName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") addCheckin();
                   }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                      {e.playersText || "Team"}
-                    </div>
-                    <div style={{ fontSize: 12, color: COLORS.muted }}>
-                      {e.teamName}
-                    </div>
-                  </div>
-                  <div style={{ fontWeight: 1000, fontSize: 18 }}>
-                    {scoreLabel(e.score)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+                />
 
-        {/* Cards */}
+                {isSeated && (
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button
+                      style={{
+                        ...button(checkinPool === "A"),
+                        flex: 1,
+                        background: checkinPool === "A" ? COLORS.orange : "#fff",
+                      }}
+                      onClick={() => setCheckinPool("A")}
+                    >
+                      Pool A
+                    </button>
+                    <button
+                      style={{
+                        ...button(checkinPool === "B"),
+                        flex: 1,
+                        background: checkinPool === "B" ? COLORS.orange : "#fff",
+                      }}
+                      onClick={() => setCheckinPool("B")}
+                    >
+                      Pool B
+                    </button>
+                  </div>
+                )}
+
+                <button style={button(true)} onClick={addCheckin}>
+                  Check In
+                </button>
+
+                {checkins.length > 0 ? (
+                  <div style={{ marginTop: 6, fontSize: 13, color: COLORS.muted }}>
+                    Checked in: {checkins.slice(-12).map((p) => p.name).join(", ")}
+                    {checkins.length > 12 ? "…" : ""}
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 6, fontSize: 13, color: COLORS.muted }}>
+                    Add players as they arrive.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 3) Cards */}
         <div style={{ marginTop: 14, ...cardStyle }}>
           <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
             Cards
@@ -839,17 +766,13 @@ export default function DoublesPage() {
               Cards will appear after the admin starts the round.
             </div>
           ) : cards.length === 0 ? (
-            <div style={{ marginTop: 10, color: COLORS.muted }}>
-              No cards found.
-            </div>
+            <div style={{ marginTop: 10, color: COLORS.muted }}>No cards found.</div>
           ) : (
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
               {cards.map((c, idx) => {
                 const sub = submissions[c.id];
                 const isOpen = expandedCardId === c.id;
-                const statusText = sub
-                  ? `Submitted: ${sub.label}`
-                  : "Not submitted";
+                const statusText = sub ? `Submitted: ${sub.label}` : "Not submitted";
                 const statusColor = sub ? COLORS.green : COLORS.muted;
 
                 return (
@@ -892,12 +815,7 @@ export default function DoublesPage() {
                     </div>
 
                     {isOpen && (
-                      <div
-                        style={{
-                          padding: 12,
-                          borderTop: `1px solid ${COLORS.border}`,
-                        }}
-                      >
+                      <div style={{ padding: 12, borderTop: `1px solid ${COLORS.border}` }}>
                         <div style={{ display: "grid", gap: 8 }}>
                           {(c.teams || []).map((t) => (
                             <div
@@ -909,17 +827,11 @@ export default function DoublesPage() {
                                 border: `1px solid ${COLORS.border}`,
                               }}
                             >
-                              <div style={{ fontWeight: 1000 }}>
-                                {teamDisplay(t)}
-                              </div>
+                              <div style={{ fontWeight: 1000 }}>{teamDisplay(t)}</div>
                               {isSeated && (
-                                <div
-                                  style={{ fontSize: 12, color: COLORS.muted }}
-                                >
+                                <div style={{ fontSize: 12, color: COLORS.muted }}>
                                   {(t.players || [])
-                                    .map((p) =>
-                                      p.pool ? `${p.name} (${p.pool})` : p.name
-                                    )
+                                    .map((p) => (p.pool ? `${p.name} (${p.pool})` : p.name))
                                     .join(" • ")}
                                 </div>
                               )}
@@ -927,16 +839,12 @@ export default function DoublesPage() {
                           ))}
                         </div>
 
-                        <div
-                          style={{ marginTop: 12, ...cardStyle, padding: 12 }}
-                        >
+                        <div style={{ marginTop: 12, ...cardStyle, padding: 12 }}>
                           <div style={{ fontWeight: 1000, color: COLORS.navy }}>
                             Log Round Score (Relative Par)
                           </div>
 
-                          <div
-                            style={{ marginTop: 10, display: "grid", gap: 10 }}
-                          >
+                          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                             <input
                               style={input}
                               type="number"
@@ -954,21 +862,12 @@ export default function DoublesPage() {
                               Allowed: -18 to +18
                             </div>
 
-                            <button
-                              style={button(true)}
-                              onClick={() => submitCardScore(c.id)}
-                            >
+                            <button style={button(true)} onClick={() => submitCardScore(c.id)}>
                               Submit Score
                             </button>
 
                             {!!submitMsgByCard[c.id] && (
-                              <div
-                                style={{
-                                  fontWeight: 900,
-                                  color: COLORS.green,
-                                  marginTop: 4,
-                                }}
-                              >
+                              <div style={{ fontWeight: 900, color: COLORS.green, marginTop: 4 }}>
                                 {submitMsgByCard[c.id]}
                               </div>
                             )}
@@ -983,12 +882,49 @@ export default function DoublesPage() {
           )}
         </div>
 
-        {/* Admin (bottom) */}
+        {/* 4) Leaderboard (only after started; placed above Admin) */}
+        {started && (
+          <div style={{ marginTop: 14, ...cardStyle }}>
+            <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
+              Leaderboard
+            </div>
+
+            {leaderboard.length === 0 ? (
+              <div style={{ marginTop: 10, color: COLORS.muted }}>No scores yet.</div>
+            ) : (
+              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                {leaderboard.map((e) => (
+                  <div
+                    key={e.teamId}
+                    style={{
+                      border: `1px solid ${COLORS.border}`,
+                      borderRadius: 14,
+                      padding: 12,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                        {e.playersText || "Team"}
+                      </div>
+                      <div style={{ fontSize: 12, color: COLORS.muted }}>{e.teamName}</div>
+                    </div>
+                    <div style={{ fontWeight: 1000, fontSize: 18 }}>
+                      {scoreLabel(e.score)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 5) Admin (bottom) */}
         <div style={{ marginTop: 14, ...cardStyle }}>
-          <div
-            style={sectionTitleRow}
-            onClick={() => setAdminExpanded((v) => !v)}
-          >
+          <div style={sectionTitleRow} onClick={() => setAdminExpanded((v) => !v)}>
             <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
               Admin
             </div>
@@ -1022,21 +958,14 @@ export default function DoublesPage() {
                 <>
                   {/* Settings */}
                   <div style={{ ...cardStyle, padding: 12 }}>
-                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                      Settings
-                    </div>
+                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>Settings</div>
 
                     <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                      <div
-                        style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
-                      >
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                         <button
                           style={{
                             ...button(formatChoice === "seated"),
-                            background:
-                              formatChoice === "seated"
-                                ? COLORS.orange
-                                : "#fff",
+                            background: formatChoice === "seated" ? COLORS.orange : "#fff",
                             flex: 1,
                             minWidth: 220,
                           }}
@@ -1047,10 +976,7 @@ export default function DoublesPage() {
                         <button
                           style={{
                             ...button(formatChoice === "random"),
-                            background:
-                              formatChoice === "random"
-                                ? COLORS.orange
-                                : "#fff",
+                            background: formatChoice === "random" ? COLORS.orange : "#fff",
                             flex: 1,
                             minWidth: 220,
                           }}
@@ -1060,14 +986,11 @@ export default function DoublesPage() {
                         </button>
                       </div>
 
-                      <div
-                        style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
-                      >
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                         <button
                           style={{
                             ...button(caliMode === "random"),
-                            background:
-                              caliMode === "random" ? COLORS.orange : "#fff",
+                            background: caliMode === "random" ? COLORS.orange : "#fff",
                             flex: 1,
                             minWidth: 220,
                           }}
@@ -1078,8 +1001,7 @@ export default function DoublesPage() {
                         <button
                           style={{
                             ...button(caliMode === "manual"),
-                            background:
-                              caliMode === "manual" ? COLORS.orange : "#fff",
+                            background: caliMode === "manual" ? COLORS.orange : "#fff",
                             flex: 1,
                             minWidth: 220,
                           }}
@@ -1092,18 +1014,15 @@ export default function DoublesPage() {
                       {caliMode === "manual" && (
                         <div style={{ display: "grid", gap: 8 }}>
                           <div style={{ fontSize: 12, color: COLORS.muted }}>
-                            Only used if there is an odd number of checked-in
-                            players. (For seated doubles, selection should come
-                            from the odd pool.)
+                            Only used if there is an odd number of checked-in players. (For seated
+                            doubles, selection should come from the odd pool.)
                           </div>
                           <select
                             style={input}
                             value={manualCaliId}
                             onChange={(e) => setManualCaliId(e.target.value)}
                           >
-                            <option value="">
-                              Select Cali player (optional)
-                            </option>
+                            <option value="">Select Cali player (optional)</option>
                             {checkins.map((p) => (
                               <option key={p.id} value={p.id}>
                                 {p.name}
@@ -1130,9 +1049,7 @@ export default function DoublesPage() {
                   {/* Late player */}
                   {started && (
                     <div style={{ ...cardStyle, padding: 12 }}>
-                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                        Add Late Player
-                      </div>
+                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>Add Late Player</div>
                       <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                         <input
                           style={input}
@@ -1147,8 +1064,7 @@ export default function DoublesPage() {
                               style={{
                                 ...button(latePool === "A"),
                                 flex: 1,
-                                background:
-                                  latePool === "A" ? COLORS.orange : "#fff",
+                                background: latePool === "A" ? COLORS.orange : "#fff",
                               }}
                               onClick={() => setLatePool("A")}
                             >
@@ -1158,8 +1074,7 @@ export default function DoublesPage() {
                               style={{
                                 ...button(latePool === "B"),
                                 flex: 1,
-                                background:
-                                  latePool === "B" ? COLORS.orange : "#fff",
+                                background: latePool === "B" ? COLORS.orange : "#fff",
                               }}
                               onClick={() => setLatePool("B")}
                             >
@@ -1170,17 +1085,9 @@ export default function DoublesPage() {
 
                         <div style={{ display: "grid", gap: 6 }}>
                           <div style={{ fontSize: 12, color: COLORS.muted }}>
-                            Late player behavior:
-                            <ul style={{ margin: "6px 0 0 18px" }}>
-                              <li>
-                                If there’s an unpaired Cali already on a card,
-                                the late player becomes their teammate.
-                              </li>
-                              <li>
-                                Otherwise, the late player is added as a Cali on
-                                the selected card.
-                              </li>
-                            </ul>
+                            If there’s an unpaired Cali already on a card, the late player becomes
+                            their teammate. Otherwise, the late player is added as a Cali on the
+                            selected card.
                           </div>
 
                           <select
@@ -1202,9 +1109,7 @@ export default function DoublesPage() {
                         </button>
 
                         {!!lateMsg && (
-                          <div style={{ fontWeight: 900, color: COLORS.green }}>
-                            {lateMsg}
-                          </div>
+                          <div style={{ fontWeight: 900, color: COLORS.green }}>{lateMsg}</div>
                         )}
                       </div>
                     </div>
@@ -1213,9 +1118,7 @@ export default function DoublesPage() {
                   {/* Edit holes */}
                   {started && cards.length > 0 && (
                     <div style={{ ...cardStyle, padding: 12 }}>
-                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                        Starting Holes
-                      </div>
+                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>Starting Holes</div>
 
                       {!editHolesOpen ? (
                         <button
@@ -1230,21 +1133,13 @@ export default function DoublesPage() {
                           Edit Starting Holes
                         </button>
                       ) : (
-                        <div
-                          style={{ marginTop: 10, display: "grid", gap: 10 }}
-                        >
+                        <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                           {cards.map((c, i) => (
                             <div
                               key={c.id}
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 10,
-                              }}
+                              style={{ display: "flex", alignItems: "center", gap: 10 }}
                             >
-                              <div style={{ width: 120, fontWeight: 900 }}>
-                                Card {i + 1}
-                              </div>
+                              <div style={{ width: 120, fontWeight: 900 }}>Card {i + 1}</div>
                               <input
                                 style={{ ...input, maxWidth: 140 }}
                                 type="number"
@@ -1252,26 +1147,17 @@ export default function DoublesPage() {
                                 max={18}
                                 value={holeEdits[c.id] ?? c.startHole}
                                 onChange={(e) =>
-                                  setHoleEdits((h) => ({
-                                    ...h,
-                                    [c.id]: e.target.value,
-                                  }))
+                                  setHoleEdits((h) => ({ ...h, [c.id]: e.target.value }))
                                 }
                               />
                             </div>
                           ))}
 
                           <div style={{ display: "flex", gap: 10 }}>
-                            <button
-                              style={button(true)}
-                              onClick={saveStartingHoleEdits}
-                            >
+                            <button style={button(true)} onClick={saveStartingHoleEdits}>
                               Save
                             </button>
-                            <button
-                              style={button(false)}
-                              onClick={() => setEditHolesOpen(false)}
-                            >
+                            <button style={button(false)} onClick={() => setEditHolesOpen(false)}>
                               Cancel
                             </button>
                           </div>
@@ -1290,8 +1176,14 @@ export default function DoublesPage() {
                       marginTop: 4,
                     }}
                   >
+                    {/* Make Teams & Cards => RED now */}
                     <button
-                      style={bigAdminButton(false)}
+                      style={{
+                        ...bigAdminButton(false),
+                        background: COLORS.red,
+                        border: `2px solid ${COLORS.red}`,
+                        color: "white",
+                      }}
                       onClick={makeTeamsAndCards}
                       disabled={checkins.length < 4 || started}
                       title={
@@ -1318,10 +1210,7 @@ export default function DoublesPage() {
                       Edit Starting Holes
                     </button>
 
-                    <button
-                      style={bigAdminButton(true)}
-                      onClick={eraseDoublesInfo}
-                    >
+                    <button style={bigAdminButton(true)} onClick={eraseDoublesInfo}>
                       Erase Doubles Information
                     </button>
                   </div>
