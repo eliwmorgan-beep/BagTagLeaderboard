@@ -51,15 +51,12 @@ export default function DoublesPage() {
   const [todayExpanded, setTodayExpanded] = useState(true);
   const [checkinExpanded, setCheckinExpanded] = useState(true);
   const [adminExpanded, setAdminExpanded] = useState(false);
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
-  const [adminPw, setAdminPw] = useState("");
 
   // Check-in UI
   const [checkinName, setCheckinName] = useState("");
   const [checkinPool, setCheckinPool] = useState("A");
 
-  // ✅ Start Round password + feedback (UI-based, no prompt)
-  const [startPw, setStartPw] = useState("");
+  // Player-checkin “start round” feedback
   const [startRoundMsg, setStartRoundMsg] = useState("");
   const [startRoundMsgColor, setStartRoundMsgColor] = useState(COLORS.muted);
 
@@ -93,13 +90,10 @@ export default function DoublesPage() {
       manualCaliId: "",
       layoutNote: "",
       checkins: [], // [{id,name,pool}]
-      cali: {
-        playerId: "",
-        teammateId: "",
-      },
-      cards: [],
-      submissions: {},
-      leaderboard: [],
+      cali: { playerId: "", teammateId: "" },
+      cards: [], // [{id, startHole, teams:[{id,type:"doubles"|"cali", players:[{id,name,pool}]}]}]
+      submissions: {}, // cardId -> {submittedAt, score, label}
+      leaderboard: [], // [{teamId, teamName, playersText, score}]
       updatedAt: Date.now(),
     }),
     []
@@ -124,13 +118,12 @@ export default function DoublesPage() {
         setDoubles(d);
         setLoading(false);
 
-        // keep admin UI synced
+        // keep settings UI synced to Firestore
         setFormatChoice(d.format || "random");
         setCaliMode(d.caliMode || "random");
         setManualCaliId(d.manualCaliId || "");
         setLayoutNote(d.layoutNote || "");
 
-        // default late card selection
         if (!lateCardId && (d.cards || []).length) {
           setLateCardId(d.cards[0].id);
         }
@@ -167,15 +160,19 @@ export default function DoublesPage() {
     return { fmtLabel, caliLabel };
   }, [doubles]);
 
-  async function saveAdminSettings() {
-    if (!adminUnlocked) return;
-    await updateDoc(leagueRef, {
-      "doubles.format": formatChoice,
-      "doubles.caliMode": caliMode,
-      "doubles.manualCaliId": caliMode === "manual" ? manualCaliId : "",
-      "doubles.layoutNote": layoutNote || "",
-      "doubles.updatedAt": Date.now(),
-    });
+  // ✅ Password gate: only ask when doing protected actions
+  async function withAdminPassword(actionName, fn) {
+    const pw = window.prompt(`Admin password required for: ${actionName}`);
+    if (pw !== ADMIN_PASSWORD) {
+      window.alert("Wrong password.");
+      return;
+    }
+    try {
+      return await fn();
+    } catch (err) {
+      window.alert(`${actionName} failed: ${err?.message || String(err)}`);
+      throw err;
+    }
   }
 
   async function addCheckin() {
@@ -301,7 +298,7 @@ export default function DoublesPage() {
       }
     }
 
-    // build cards: 2 teams per card, hole gap of 2
+    // Build cards: 2 teams per card, hole gap of 2
     const cardTeams = [...teams];
     const cardsOut = [];
     let startHole = 1;
@@ -356,34 +353,41 @@ export default function DoublesPage() {
     return names.join(", ");
   }
 
-  // ✅ This is the FIXED “Make Teams & Cards” handler
-  async function handleStartRound() {
-    setStartRoundMsg("");
-    setStartRoundMsgColor(COLORS.muted);
+  async function saveAdminSettings() {
+    return withAdminPassword("Save Settings", async () => {
+      await updateDoc(leagueRef, {
+        "doubles.format": formatChoice,
+        "doubles.caliMode": caliMode,
+        "doubles.manualCaliId": caliMode === "manual" ? manualCaliId : "",
+        "doubles.layoutNote": layoutNote || "",
+        "doubles.updatedAt": Date.now(),
+      });
+      setStartRoundMsgColor(COLORS.green);
+      setStartRoundMsg("✅ Settings saved.");
+      setTimeout(() => setStartRoundMsg(""), 2000);
+    });
+  }
 
-    if (startPw !== ADMIN_PASSWORD) {
-      setStartRoundMsgColor(COLORS.red);
-      setStartRoundMsg("Wrong admin password.");
-      return;
-    }
-
-    if (started) {
-      setStartRoundMsgColor(COLORS.red);
-      setStartRoundMsg("Round already started.");
-      return;
-    }
-
-    if (checkins.length < 4) {
-      setStartRoundMsgColor(COLORS.red);
-      setStartRoundMsg("Need at least 4 players checked in to start doubles.");
-      return;
-    }
-
-    try {
+  async function makeTeamsAndCards() {
+    return withAdminPassword("Make Teams & Cards", async () => {
+      setStartRoundMsg("");
       setStartRoundMsgColor(COLORS.muted);
+
+      if (started) {
+        setStartRoundMsgColor(COLORS.red);
+        setStartRoundMsg("Round already started.");
+        return;
+      }
+      if (checkins.length < 4) {
+        setStartRoundMsgColor(COLORS.red);
+        setStartRoundMsg(
+          "Need at least 4 players checked in to start doubles."
+        );
+        return;
+      }
+
       setStartRoundMsg("Creating teams & cards…");
 
-      // Use the current admin settings values
       const fmt = formatChoice;
       const mode = caliMode;
       const manualId = mode === "manual" ? manualCaliId : "";
@@ -406,35 +410,28 @@ export default function DoublesPage() {
 
       setStartRoundMsgColor(COLORS.green);
       setStartRoundMsg("✅ Teams & cards created. Cards are now available.");
-      setStartPw("");
       setTodayExpanded(false);
       setCheckinExpanded(false);
-    } catch (err) {
-      setStartRoundMsgColor(COLORS.red);
-      setStartRoundMsg(
-        `❌ Failed to start round: ${err?.message || String(err)}`
-      );
-    }
+    });
   }
 
   async function eraseDoublesInfo() {
-    if (!adminUnlocked) return;
-    await updateDoc(leagueRef, {
-      doubles: defaultDoubles,
-      "doubles.updatedAt": Date.now(),
-    });
+    return withAdminPassword("Erase Doubles Information", async () => {
+      await updateDoc(leagueRef, {
+        doubles: defaultDoubles,
+        "doubles.updatedAt": Date.now(),
+      });
 
-    setExpandedCardId(null);
-    setScoreDraftByCard({});
-    setSubmitMsgByCard({});
-    setHoleEdits({});
-    setLateMsg("");
-    setLateName("");
-    setCheckinName("");
-    setStartPw("");
-    setStartRoundMsg("");
-    setAdminExpanded(false);
-    setAdminUnlocked(false);
+      setExpandedCardId(null);
+      setScoreDraftByCard({});
+      setSubmitMsgByCard({});
+      setHoleEdits({});
+      setLateMsg("");
+      setLateName("");
+      setCheckinName("");
+      setStartRoundMsg("");
+      setAdminExpanded(false);
+    });
   }
 
   async function submitCardScore(cardId) {
@@ -477,20 +474,24 @@ export default function DoublesPage() {
   }
 
   async function saveStartingHoleEdits() {
-    if (!adminUnlocked) return;
-    const updatedCards = cards.map((c) => {
-      const proposed = holeEdits[c.id];
-      if (proposed === undefined || proposed === null || proposed === "")
-        return c;
-      const val = clamp(parseInt(proposed, 10) || c.startHole, 1, 18);
-      return { ...c, startHole: val };
-    });
+    return withAdminPassword("Save Starting Hole Edits", async () => {
+      const updatedCards = cards.map((c) => {
+        const proposed = holeEdits[c.id];
+        if (proposed === undefined || proposed === null || proposed === "")
+          return c;
+        const val = clamp(parseInt(proposed, 10) || c.startHole, 1, 18);
+        return { ...c, startHole: val };
+      });
 
-    await updateDoc(leagueRef, {
-      "doubles.cards": updatedCards,
-      "doubles.updatedAt": Date.now(),
+      await updateDoc(leagueRef, {
+        "doubles.cards": updatedCards,
+        "doubles.updatedAt": Date.now(),
+      });
+      setEditHolesOpen(false);
+      setStartRoundMsgColor(COLORS.green);
+      setStartRoundMsg("✅ Starting holes updated.");
+      setTimeout(() => setStartRoundMsg(""), 2000);
     });
-    setEditHolesOpen(false);
   }
 
   function findOpenCaliTeam(cardsList) {
@@ -503,103 +504,101 @@ export default function DoublesPage() {
   }
 
   async function addLatePlayer() {
-    if (!adminUnlocked) return;
-    setLateMsg("");
+    return withAdminPassword("Add Late Player", async () => {
+      setLateMsg("");
 
-    const name = lateName.trim();
-    if (!name) return;
+      const name = lateName.trim();
+      if (!name) return;
 
-    const already = checkins.some(
-      (p) => (p.name || "").toLowerCase() === name.toLowerCase()
-    );
-    if (already) {
-      setLateMsg("That name is already checked in.");
-      return;
-    }
+      const already = checkins.some(
+        (p) => (p.name || "").toLowerCase() === name.toLowerCase()
+      );
+      if (already) {
+        setLateMsg("That name is already checked in.");
+        return;
+      }
 
-    const newPlayer = {
-      id: uid(),
-      name,
-      pool: (doubles?.format || "random") === "seated" ? latePool : "",
-      createdAt: Date.now(),
-      late: true,
-    };
+      const newPlayer = {
+        id: uid(),
+        name,
+        pool: (doubles?.format || "random") === "seated" ? latePool : "",
+        createdAt: Date.now(),
+        late: true,
+      };
 
-    const newCheckins = [...checkins, newPlayer];
+      const newCheckins = [...checkins, newPlayer];
 
-    const openCali = findOpenCaliTeam(cards);
-    let newCards = [...cards];
+      const openCali = findOpenCaliTeam(cards);
+      let newCards = [...cards];
 
-    if (openCali) {
-      newCards = cards.map((c) => {
-        if (c.id !== openCali.cardId) return c;
-        const teams = (c.teams || []).map((t) => {
-          if (t.id !== openCali.teamId) return t;
-          return {
-            ...t,
-            players: [
-              ...(t.players || []),
-              { id: newPlayer.id, name: newPlayer.name, pool: newPlayer.pool },
-            ],
-          };
+      if (openCali) {
+        newCards = cards.map((c) => {
+          if (c.id !== openCali.cardId) return c;
+          const teams = (c.teams || []).map((t) => {
+            if (t.id !== openCali.teamId) return t;
+            return {
+              ...t,
+              players: [
+                ...(t.players || []),
+                {
+                  id: newPlayer.id,
+                  name: newPlayer.name,
+                  pool: newPlayer.pool,
+                },
+              ],
+            };
+          });
+          return { ...c, teams };
         });
-        return { ...c, teams };
+
+        await updateDoc(leagueRef, {
+          "doubles.checkins": newCheckins,
+          "doubles.cards": newCards,
+          "doubles.cali": {
+            ...(doubles?.cali || { playerId: "", teammateId: "" }),
+            teammateId: newPlayer.id,
+          },
+          "doubles.updatedAt": Date.now(),
+        });
+
+        setLateMsg("Late player added as Cali teammate.");
+        setLateName("");
+        return;
+      }
+
+      const targetId = lateCardId || (cards[0] ? cards[0].id : "");
+      if (!targetId) {
+        await updateDoc(leagueRef, {
+          "doubles.checkins": newCheckins,
+          "doubles.updatedAt": Date.now(),
+        });
+        setLateMsg("Late player checked in. (No cards exist yet.)");
+        setLateName("");
+        return;
+      }
+
+      const caliTeam = {
+        id: uid(),
+        type: "cali",
+        players: [
+          { id: newPlayer.id, name: newPlayer.name, pool: newPlayer.pool },
+        ],
+      };
+
+      newCards = cards.map((c) => {
+        if (c.id !== targetId) return c;
+        return { ...c, teams: [...(c.teams || []), caliTeam] };
       });
 
       await updateDoc(leagueRef, {
         "doubles.checkins": newCheckins,
         "doubles.cards": newCards,
-        "doubles.cali": {
-          ...(doubles?.cali || { playerId: "", teammateId: "" }),
-          teammateId: newPlayer.id,
-        },
         "doubles.updatedAt": Date.now(),
       });
 
-      setLateMsg("Late player added as Cali teammate.");
+      setLateMsg("Late player added as Cali on selected card.");
       setLateName("");
-      return;
-    }
-
-    const targetId = lateCardId || (cards[0] ? cards[0].id : "");
-    if (!targetId) {
-      await updateDoc(leagueRef, {
-        "doubles.checkins": newCheckins,
-        "doubles.updatedAt": Date.now(),
-      });
-      setLateMsg("Late player checked in. (No cards exist yet.)");
-      setLateName("");
-      return;
-    }
-
-    const caliTeam = {
-      id: uid(),
-      type: "cali",
-      players: [
-        { id: newPlayer.id, name: newPlayer.name, pool: newPlayer.pool },
-      ],
-    };
-
-    newCards = cards.map((c) => {
-      if (c.id !== targetId) return c;
-      return { ...c, teams: [...(c.teams || []), caliTeam] };
     });
-
-    await updateDoc(leagueRef, {
-      "doubles.checkins": newCheckins,
-      "doubles.cards": newCards,
-      "doubles.updatedAt": Date.now(),
-    });
-
-    setLateMsg("Late player added as Cali on selected card.");
-    setLateName("");
-  }
-
-  function tryUnlockAdmin() {
-    if (adminPw === ADMIN_PASSWORD) {
-      setAdminUnlocked(true);
-      setAdminPw("");
-    }
   }
 
   const pageWrap = {
@@ -638,15 +637,16 @@ export default function DoublesPage() {
     cursor: "pointer",
   });
 
-  const bigAdminButton = (danger = false) => ({
+  const dangerButton = {
     padding: "14px 18px",
     borderRadius: 14,
-    border: `2px solid ${COLORS.navy}`,
-    background: danger ? "#fff5f5" : COLORS.orange,
+    border: `2px solid ${COLORS.red}`,
+    background: COLORS.red,
+    color: "white",
     fontWeight: 1000,
     cursor: "pointer",
-    minWidth: 240,
-  });
+    width: "100%",
+  };
 
   const input = {
     width: "100%",
@@ -698,7 +698,7 @@ export default function DoublesPage() {
                 <div style={{ marginTop: 6 }}>
                   <b>Layout:</b> {doubles.layoutNote ? doubles.layoutNote : "—"}
                 </div>
-                <div style={{ marginTop: 6 }}>
+                <div style={{ marginTop: 10, fontSize: 16 }}>
                   <b>Check-in:</b> {checkinStatus}
                 </div>
               </div>
@@ -706,7 +706,7 @@ export default function DoublesPage() {
           )}
         </div>
 
-        {/* 2) Player Check-in (own section; disappears after start) */}
+        {/* 2) Player Check-in */}
         {!started && (
           <div style={{ marginTop: 14, ...cardStyle }}>
             <div
@@ -766,29 +766,32 @@ export default function DoublesPage() {
                   Check In
                 </button>
 
-                {/* ✅ password input + start round button (no prompt) */}
-                <input
-                  style={input}
-                  type="password"
-                  placeholder="Admin password to start round"
-                  value={startPw}
-                  onChange={(e) => setStartPw(e.target.value)}
-                />
-
-                <button
-                  style={{
-                    padding: "14px 18px",
-                    borderRadius: 14,
-                    border: `2px solid ${COLORS.red}`,
-                    background: COLORS.red,
-                    color: "white",
-                    fontWeight: 1000,
-                    cursor: "pointer",
-                  }}
-                  onClick={handleStartRound}
-                >
-                  Make Teams & Cards (Admin)
-                </button>
+                {/* ✅ Bigger checked-in text */}
+                {checkins.length > 0 ? (
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontSize: 16,
+                      color: COLORS.navy,
+                      fontWeight: 900,
+                    }}
+                  >
+                    Checked in:{" "}
+                    <span style={{ color: COLORS.muted, fontWeight: 700 }}>
+                      {checkins
+                        .slice(-12)
+                        .map((p) => p.name)
+                        .join(", ")}
+                      {checkins.length > 12 ? "…" : ""}
+                    </span>
+                  </div>
+                ) : (
+                  <div
+                    style={{ marginTop: 6, fontSize: 14, color: COLORS.muted }}
+                  >
+                    Add players as they arrive.
+                  </div>
+                )}
 
                 {!!startRoundMsg && (
                   <div style={{ fontWeight: 900, color: startRoundMsgColor }}>
@@ -980,7 +983,7 @@ export default function DoublesPage() {
           </div>
         )}
 
-        {/* 5) Admin */}
+        {/* 5) Admin (no unlock; password only on actions) */}
         <div style={{ marginTop: 14, ...cardStyle }}>
           <div
             style={sectionTitleRow}
@@ -996,212 +999,242 @@ export default function DoublesPage() {
 
           {adminExpanded && (
             <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              {!adminUnlocked ? (
-                <div style={{ display: "grid", gap: 10 }}>
-                  <div style={{ color: COLORS.muted }}>
-                    Enter password to unlock admin tools.
-                  </div>
-                  <input
-                    style={input}
-                    type="password"
-                    placeholder="Admin password"
-                    value={adminPw}
-                    onChange={(e) => setAdminPw(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") tryUnlockAdmin();
-                    }}
-                  />
-                  <button style={button(true)} onClick={tryUnlockAdmin}>
-                    Unlock
-                  </button>
+              {/* Settings */}
+              <div style={{ ...cardStyle, padding: 12 }}>
+                <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                  Settings
                 </div>
-              ) : (
-                <>
-                  <div style={{ ...cardStyle, padding: 12 }}>
-                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                      Settings
-                    </div>
 
-                    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                      <div
-                        style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
-                      >
-                        <button
-                          style={{
-                            ...button(formatChoice === "seated"),
-                            background:
-                              formatChoice === "seated"
-                                ? COLORS.orange
-                                : "#fff",
-                            flex: 1,
-                            minWidth: 220,
-                          }}
-                          onClick={() => setFormatChoice("seated")}
-                        >
-                          Seated Doubles (A/B)
-                        </button>
-                        <button
-                          style={{
-                            ...button(formatChoice === "random"),
-                            background:
-                              formatChoice === "random"
-                                ? COLORS.orange
-                                : "#fff",
-                            flex: 1,
-                            minWidth: 220,
-                          }}
-                          onClick={() => setFormatChoice("random")}
-                        >
-                          Random Doubles
-                        </button>
-                      </div>
-
-                      <div
-                        style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
-                      >
-                        <button
-                          style={{
-                            ...button(caliMode === "random"),
-                            background:
-                              caliMode === "random" ? COLORS.orange : "#fff",
-                            flex: 1,
-                            minWidth: 220,
-                          }}
-                          onClick={() => setCaliMode("random")}
-                        >
-                          Cali: Random (if odd)
-                        </button>
-                        <button
-                          style={{
-                            ...button(caliMode === "manual"),
-                            background:
-                              caliMode === "manual" ? COLORS.orange : "#fff",
-                            flex: 1,
-                            minWidth: 220,
-                          }}
-                          onClick={() => setCaliMode("manual")}
-                        >
-                          Cali: Admin selects (if odd)
-                        </button>
-                      </div>
-
-                      {caliMode === "manual" && (
-                        <select
-                          style={input}
-                          value={manualCaliId}
-                          onChange={(e) => setManualCaliId(e.target.value)}
-                        >
-                          <option value="">
-                            Select Cali player (optional)
-                          </option>
-                          {checkins.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name}
-                              {p.pool ? ` (${p.pool})` : ""}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-
-                      <textarea
-                        style={{ ...input, minHeight: 90, resize: "vertical" }}
-                        placeholder='Layout note (ex: "Front 9, skip hole 7" or "Shotgun start, hole gap")'
-                        value={layoutNote}
-                        onChange={(e) => setLayoutNote(e.target.value)}
-                      />
-
-                      <button style={button(true)} onClick={saveAdminSettings}>
-                        Save Settings
-                      </button>
-                    </div>
-                  </div>
-
-                  {started && cards.length > 0 && (
-                    <div style={{ ...cardStyle, padding: 12 }}>
-                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                        Starting Holes
-                      </div>
-
-                      {!editHolesOpen ? (
-                        <button
-                          style={{ ...button(true), marginTop: 10 }}
-                          onClick={() => {
-                            const init = {};
-                            cards.forEach((c) => (init[c.id] = c.startHole));
-                            setHoleEdits(init);
-                            setEditHolesOpen(true);
-                          }}
-                        >
-                          Edit Starting Holes
-                        </button>
-                      ) : (
-                        <div
-                          style={{ marginTop: 10, display: "grid", gap: 10 }}
-                        >
-                          {cards.map((c, i) => (
-                            <div
-                              key={c.id}
-                              style={{
-                                display: "flex",
-                                gap: 10,
-                                alignItems: "center",
-                              }}
-                            >
-                              <div style={{ width: 120, fontWeight: 900 }}>
-                                Card {i + 1}
-                              </div>
-                              <input
-                                style={{ ...input, maxWidth: 140 }}
-                                type="number"
-                                min={1}
-                                max={18}
-                                value={holeEdits[c.id] ?? c.startHole}
-                                onChange={(e) =>
-                                  setHoleEdits((h) => ({
-                                    ...h,
-                                    [c.id]: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-                          ))}
-
-                          <div style={{ display: "flex", gap: 10 }}>
-                            <button
-                              style={button(true)}
-                              onClick={saveStartingHoleEdits}
-                            >
-                              Save
-                            </button>
-                            <button
-                              style={button(false)}
-                              onClick={() => setEditHolesOpen(false)}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 12,
-                      flexWrap: "wrap",
-                      justifyContent: "center",
-                    }}
-                  >
+                <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
-                      style={bigAdminButton(true)}
-                      onClick={eraseDoublesInfo}
+                      style={{
+                        ...button(formatChoice === "seated"),
+                        background:
+                          formatChoice === "seated" ? COLORS.orange : "#fff",
+                        flex: 1,
+                        minWidth: 220,
+                      }}
+                      onClick={() => setFormatChoice("seated")}
                     >
-                      Erase Doubles Information
+                      Seated Doubles (A/B)
+                    </button>
+                    <button
+                      style={{
+                        ...button(formatChoice === "random"),
+                        background:
+                          formatChoice === "random" ? COLORS.orange : "#fff",
+                        flex: 1,
+                        minWidth: 220,
+                      }}
+                      onClick={() => setFormatChoice("random")}
+                    >
+                      Random Doubles
                     </button>
                   </div>
-                </>
+
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <button
+                      style={{
+                        ...button(caliMode === "random"),
+                        background:
+                          caliMode === "random" ? COLORS.orange : "#fff",
+                        flex: 1,
+                        minWidth: 220,
+                      }}
+                      onClick={() => setCaliMode("random")}
+                    >
+                      Cali: Random (if odd)
+                    </button>
+                    <button
+                      style={{
+                        ...button(caliMode === "manual"),
+                        background:
+                          caliMode === "manual" ? COLORS.orange : "#fff",
+                        flex: 1,
+                        minWidth: 220,
+                      }}
+                      onClick={() => setCaliMode("manual")}
+                    >
+                      Cali: Admin selects (if odd)
+                    </button>
+                  </div>
+
+                  {caliMode === "manual" && (
+                    <select
+                      style={input}
+                      value={manualCaliId}
+                      onChange={(e) => setManualCaliId(e.target.value)}
+                    >
+                      <option value="">Select Cali player (optional)</option>
+                      {checkins.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                          {p.pool ? ` (${p.pool})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <textarea
+                    style={{ ...input, minHeight: 90, resize: "vertical" }}
+                    placeholder='Layout note (ex: "Front 9, skip hole 7" or "Shotgun start, hole gap")'
+                    value={layoutNote}
+                    onChange={(e) => setLayoutNote(e.target.value)}
+                  />
+
+                  <button style={button(true)} onClick={saveAdminSettings}>
+                    Save Settings (Admin)
+                  </button>
+                </div>
+              </div>
+
+              {/* Start round / Make Teams */}
+              {!started && (
+                <button style={dangerButton} onClick={makeTeamsAndCards}>
+                  Make Teams & Cards (Admin)
+                </button>
               )}
+
+              {/* Late player */}
+              {started && (
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                    Add Late Player
+                  </div>
+
+                  <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                    <input
+                      style={input}
+                      placeholder="Late player name"
+                      value={lateName}
+                      onChange={(e) => setLateName(e.target.value)}
+                    />
+
+                    {isSeated && (
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <button
+                          style={{
+                            ...button(latePool === "A"),
+                            flex: 1,
+                            background:
+                              latePool === "A" ? COLORS.orange : "#fff",
+                          }}
+                          onClick={() => setLatePool("A")}
+                        >
+                          Pool A
+                        </button>
+                        <button
+                          style={{
+                            ...button(latePool === "B"),
+                            flex: 1,
+                            background:
+                              latePool === "B" ? COLORS.orange : "#fff",
+                          }}
+                          onClick={() => setLatePool("B")}
+                        >
+                          Pool B
+                        </button>
+                      </div>
+                    )}
+
+                    <select
+                      style={input}
+                      value={lateCardId}
+                      onChange={(e) => setLateCardId(e.target.value)}
+                    >
+                      <option value="">Select card…</option>
+                      {cards.map((c, i) => (
+                        <option key={c.id} value={c.id}>
+                          Card {i + 1} (Start Hole {c.startHole})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button style={button(true)} onClick={addLatePlayer}>
+                      Add Late Player (Admin)
+                    </button>
+
+                    {!!lateMsg && (
+                      <div style={{ fontWeight: 900, color: COLORS.green }}>
+                        {lateMsg}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Edit holes */}
+              {started && cards.length > 0 && (
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                    Starting Holes
+                  </div>
+
+                  {!editHolesOpen ? (
+                    <button
+                      style={{ ...button(true), marginTop: 10 }}
+                      onClick={() => {
+                        const init = {};
+                        cards.forEach((c) => (init[c.id] = c.startHole));
+                        setHoleEdits(init);
+                        setEditHolesOpen(true);
+                      }}
+                    >
+                      Edit Starting Holes
+                    </button>
+                  ) : (
+                    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                      {cards.map((c, i) => (
+                        <div
+                          key={c.id}
+                          style={{
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "center",
+                          }}
+                        >
+                          <div style={{ width: 120, fontWeight: 900 }}>
+                            Card {i + 1}
+                          </div>
+                          <input
+                            style={{ ...input, maxWidth: 140 }}
+                            type="number"
+                            min={1}
+                            max={18}
+                            value={holeEdits[c.id] ?? c.startHole}
+                            onChange={(e) =>
+                              setHoleEdits((h) => ({
+                                ...h,
+                                [c.id]: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      ))}
+
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <button
+                          style={button(true)}
+                          onClick={saveStartingHoleEdits}
+                        >
+                          Save (Admin)
+                        </button>
+                        <button
+                          style={button(false)}
+                          onClick={() => setEditHolesOpen(false)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button style={dangerButton} onClick={eraseDoublesInfo}>
+                Erase Doubles Information (Admin)
+              </button>
             </div>
           )}
         </div>
