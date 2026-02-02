@@ -16,10 +16,11 @@ export default function HomePage() {
     fontWeight: 1000,
     cursor: "pointer",
     textDecoration: "none",
-    display: "inline-flex",
+    display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    minWidth: 160,
+    width: "100%",
+    maxWidth: 320,
     background: COLORS.orange,
     color: "#1a1a1a",
   };
@@ -38,7 +39,14 @@ export default function HomePage() {
         <Header />
 
         <div style={{ marginTop: 14, textAlign: "center" }}>
-          <div style={{ display: "flex", justifyContent: "center", gap: 14 }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 14,
+            }}
+          >
             <NavLink to="/tags" style={buttonStyle}>
               Tags
             </NavLink>
@@ -47,7 +55,6 @@ export default function HomePage() {
               Putting
             </NavLink>
 
-            {/* ✅ NEW */}
             <NavLink to="/doubles" style={buttonStyle}>
               Doubles
             </NavLink>
