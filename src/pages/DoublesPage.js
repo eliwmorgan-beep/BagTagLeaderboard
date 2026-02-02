@@ -140,7 +140,6 @@ export default function DoublesPage() {
       () => setLoading(false)
     );
     return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leagueRef, defaultDoubles]);
 
   const isSeated = (doubles?.format || "random") === "seated";
