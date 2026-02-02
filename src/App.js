@@ -213,9 +213,7 @@ export default function App() {
           padding: 24,
         }}
       >
-        <h1 style={{ color: "#004c99", marginBottom: 4 }}>
-          Pescado Mojado
-        </h1>
+        <h1 style={{ color: "#004c99", marginBottom: 4 }}>Pescado Mojado</h1>
         <div style={{ color: "#cc0000", marginBottom: 20 }}>
           Bag Tag Leaderboard
         </div>
@@ -279,11 +277,12 @@ export default function App() {
 
         <hr style={{ margin: "24px 0" }} />
 
-        <div style={{ color: "#cc0000", marginBottom: 8 }}>
-          Admin Tools
-        </div>
+        <div style={{ color: "#cc0000", marginBottom: 8 }}>Admin Tools</div>
 
-        <button onClick={() => adminAction(deleteLastRound)} style={{ margin: 4 }}>
+        <button
+          onClick={() => adminAction(deleteLastRound)}
+          style={{ margin: 4 }}
+        >
           Delete Last Round
         </button>
         <button
