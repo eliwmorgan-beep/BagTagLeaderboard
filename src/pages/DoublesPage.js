@@ -56,7 +56,7 @@ export default function DoublesPage() {
   const [checkinName, setCheckinName] = useState("");
   const [checkinPool, setCheckinPool] = useState("A");
 
-  // Player-checkin “start round” feedback
+  // Start round feedback (in Today's Format)
   const [startRoundMsg, setStartRoundMsg] = useState("");
   const [startRoundMsgColor, setStartRoundMsgColor] = useState(COLORS.muted);
 
@@ -68,8 +68,10 @@ export default function DoublesPage() {
 
   // Cards UI
   const [expandedCardId, setExpandedCardId] = useState(null);
-  const [scoreDraftByCard, setScoreDraftByCard] = useState({}); // cardId -> score (-18..18)
-  const [submitMsgByCard, setSubmitMsgByCard] = useState({}); // cardId -> string
+
+  // ✅ TEAM scoring (not card scoring)
+  const [scoreDraftByTeam, setScoreDraftByTeam] = useState({}); // teamId -> score
+  const [submitMsgByTeam, setSubmitMsgByTeam] = useState({}); // teamId -> string
 
   // Admin: edit holes
   const [editHolesOpen, setEditHolesOpen] = useState(false);
@@ -90,14 +92,27 @@ export default function DoublesPage() {
       manualCaliId: "",
       layoutNote: "",
       checkins: [], // [{id,name,pool}]
-      cali: { playerId: "", teammateId: "" },
+      cali: {
+        playerId: "",
+        teammateId: "",
+      },
       cards: [], // [{id, startHole, teams:[{id,type:"doubles"|"cali", players:[{id,name,pool}]}]}]
-      submissions: {}, // cardId -> {submittedAt, score, label}
+      submissions: {}, // ✅ teamId -> {submittedAt, score, label}
       leaderboard: [], // [{teamId, teamName, playersText, score}]
       updatedAt: Date.now(),
     }),
     []
   );
+
+  // Small helper for admin-only actions (password on click)
+  async function requireAdmin(fn) {
+    const pw = window.prompt("Admin password:");
+    if (pw !== ADMIN_PASSWORD) {
+      alert("Wrong password.");
+      return;
+    }
+    return fn();
+  }
 
   useEffect(() => {
     ensureAnonAuth().catch(() => {});
@@ -118,12 +133,13 @@ export default function DoublesPage() {
         setDoubles(d);
         setLoading(false);
 
-        // keep settings UI synced to Firestore
+        // keep admin UI synced
         setFormatChoice(d.format || "random");
         setCaliMode(d.caliMode || "random");
         setManualCaliId(d.manualCaliId || "");
         setLayoutNote(d.layoutNote || "");
 
+        // default late card selection
         if (!lateCardId && (d.cards || []).length) {
           setLateCardId(d.cards[0].id);
         }
@@ -131,14 +147,14 @@ export default function DoublesPage() {
       () => setLoading(false)
     );
     return () => unsub();
-  }, [leagueRef, defaultDoubles, lateCardId]);
+  }, [leagueRef, defaultDoubles]);
 
   const isSeated = (doubles?.format || "random") === "seated";
   const started = !!doubles?.started;
 
   const checkins = doubles?.checkins || [];
   const cards = doubles?.cards || [];
-  const submissions = doubles?.submissions || {};
+  const submissions = doubles?.submissions || {}; // ✅ team submissions
   const leaderboard = doubles?.leaderboard || [];
 
   const checkinStatus = useMemo(() => {
@@ -160,19 +176,17 @@ export default function DoublesPage() {
     return { fmtLabel, caliLabel };
   }, [doubles]);
 
-  // ✅ Password gate: only ask when doing protected actions
-  async function withAdminPassword(actionName, fn) {
-    const pw = window.prompt(`Admin password required for: ${actionName}`);
-    if (pw !== ADMIN_PASSWORD) {
-      window.alert("Wrong password.");
-      return;
-    }
-    try {
-      return await fn();
-    } catch (err) {
-      window.alert(`${actionName} failed: ${err?.message || String(err)}`);
-      throw err;
-    }
+  async function saveAdminSettings() {
+    await requireAdmin(async () => {
+      await updateDoc(leagueRef, {
+        "doubles.format": formatChoice,
+        "doubles.caliMode": caliMode,
+        "doubles.manualCaliId": caliMode === "manual" ? manualCaliId : "",
+        "doubles.layoutNote": layoutNote || "",
+        "doubles.updatedAt": Date.now(),
+      });
+      alert("Saved format/settings.");
+    });
   }
 
   async function addCheckin() {
@@ -298,7 +312,7 @@ export default function DoublesPage() {
       }
     }
 
-    // Build cards: 2 teams per card, hole gap of 2
+    // build cards: 2 teams per card, hole gap of 2
     const cardTeams = [...teams];
     const cardsOut = [];
     let startHole = 1;
@@ -353,128 +367,141 @@ export default function DoublesPage() {
     return names.join(", ");
   }
 
-  async function saveAdminSettings() {
-    return withAdminPassword("Save Settings", async () => {
-      await updateDoc(leagueRef, {
-        "doubles.format": formatChoice,
-        "doubles.caliMode": caliMode,
-        "doubles.manualCaliId": caliMode === "manual" ? manualCaliId : "",
-        "doubles.layoutNote": layoutNote || "",
-        "doubles.updatedAt": Date.now(),
-      });
-      setStartRoundMsgColor(COLORS.green);
-      setStartRoundMsg("✅ Settings saved.");
-      setTimeout(() => setStartRoundMsg(""), 2000);
-    });
-  }
+  // ✅ Start round (Make Teams & Cards) moved to Today's Format bottom
+  async function handleStartRound() {
+    setStartRoundMsg("");
+    setStartRoundMsgColor(COLORS.muted);
 
-  async function makeTeamsAndCards() {
-    return withAdminPassword("Make Teams & Cards", async () => {
-      setStartRoundMsg("");
-      setStartRoundMsgColor(COLORS.muted);
+    if (started) {
+      setStartRoundMsgColor(COLORS.red);
+      setStartRoundMsg("Round already started.");
+      return;
+    }
 
-      if (started) {
-        setStartRoundMsgColor(COLORS.red);
-        setStartRoundMsg("Round already started.");
-        return;
-      }
-      if (checkins.length < 4) {
+    if (checkins.length < 4) {
+      setStartRoundMsgColor(COLORS.red);
+      setStartRoundMsg("Need at least 4 players checked in to start doubles.");
+      return;
+    }
+
+    await requireAdmin(async () => {
+      try {
+        setStartRoundMsgColor(COLORS.muted);
+        setStartRoundMsg("Creating teams & cards…");
+
+        const fmt = formatChoice;
+        const mode = caliMode;
+        const manualId = mode === "manual" ? manualCaliId : "";
+
+        const caliInfo = pickCali(checkins, fmt, mode, manualId);
+        const built = buildTeamsAndCards(checkins, fmt, caliInfo);
+
+        await updateDoc(leagueRef, {
+          "doubles.started": true,
+          "doubles.format": fmt,
+          "doubles.caliMode": mode,
+          "doubles.manualCaliId": mode === "manual" ? manualId : "",
+          "doubles.layoutNote": layoutNote || "",
+          "doubles.cali": built.cali,
+          "doubles.cards": built.cardsOut,
+          "doubles.submissions": {}, // ✅ team submissions reset
+          "doubles.leaderboard": [],
+          "doubles.updatedAt": Date.now(),
+        });
+
+        setStartRoundMsgColor(COLORS.green);
+        setStartRoundMsg("✅ Teams & cards created. Cards are now available.");
+        setTodayExpanded(false);
+        setCheckinExpanded(false);
+      } catch (err) {
         setStartRoundMsgColor(COLORS.red);
         setStartRoundMsg(
-          "Need at least 4 players checked in to start doubles."
+          `❌ Failed to start round: ${err?.message || String(err)}`
         );
-        return;
       }
-
-      setStartRoundMsg("Creating teams & cards…");
-
-      const fmt = formatChoice;
-      const mode = caliMode;
-      const manualId = mode === "manual" ? manualCaliId : "";
-
-      const caliInfo = pickCali(checkins, fmt, mode, manualId);
-      const built = buildTeamsAndCards(checkins, fmt, caliInfo);
-
-      await updateDoc(leagueRef, {
-        "doubles.started": true,
-        "doubles.format": fmt,
-        "doubles.caliMode": mode,
-        "doubles.manualCaliId": mode === "manual" ? manualId : "",
-        "doubles.layoutNote": layoutNote || "",
-        "doubles.cali": built.cali,
-        "doubles.cards": built.cardsOut,
-        "doubles.submissions": {},
-        "doubles.leaderboard": [],
-        "doubles.updatedAt": Date.now(),
-      });
-
-      setStartRoundMsgColor(COLORS.green);
-      setStartRoundMsg("✅ Teams & cards created. Cards are now available.");
-      setTodayExpanded(false);
-      setCheckinExpanded(false);
     });
   }
 
   async function eraseDoublesInfo() {
-    return withAdminPassword("Erase Doubles Information", async () => {
+    await requireAdmin(async () => {
       await updateDoc(leagueRef, {
         doubles: defaultDoubles,
         "doubles.updatedAt": Date.now(),
       });
 
       setExpandedCardId(null);
-      setScoreDraftByCard({});
-      setSubmitMsgByCard({});
+      setScoreDraftByTeam({});
+      setSubmitMsgByTeam({});
       setHoleEdits({});
       setLateMsg("");
       setLateName("");
       setCheckinName("");
       setStartRoundMsg("");
       setAdminExpanded(false);
+      alert("Doubles reset.");
     });
   }
 
-  async function submitCardScore(cardId) {
-    const n = Number(scoreDraftByCard[cardId] ?? 0);
+  function allTeamsFlat(cardsList) {
+    const out = [];
+    for (const c of cardsList) {
+      for (const t of c.teams || []) out.push(t);
+    }
+    return out;
+  }
+
+  // ✅ submit score PER TEAM
+  async function submitTeamScore(teamId) {
+    const n = Number(scoreDraftByTeam[teamId] ?? 0);
     const score = clamp(isNaN(n) ? 0 : n, -18, 18);
 
-    const card = cards.find((c) => c.id === cardId);
-    if (!card) return;
+    // find the team
+    const teams = allTeamsFlat(cards);
+    const team = teams.find((t) => t.id === teamId);
+    if (!team) return;
 
-    const newEntries = (card.teams || []).map((t) => ({
-      teamId: t.id,
-      teamName: t.type === "cali" ? "Cali" : "Team",
-      playersText: teamPlayersText(t),
-      score,
-    }));
+    const playersText = teamPlayersText(team);
+    const teamName = team.type === "cali" ? "Cali" : "Team";
 
-    const existing = [...leaderboard];
-    const byId = new Map(existing.map((e) => [e.teamId, e]));
-    for (const e of newEntries) byId.set(e.teamId, e);
-
-    const merged = Array.from(byId.values()).sort((a, b) => a.score - b.score);
-
-    await updateDoc(leagueRef, {
-      [`doubles.submissions.${cardId}`]: {
+    // merge into existing submissions map
+    const newSubmissions = {
+      ...submissions,
+      [teamId]: {
         submittedAt: Date.now(),
         score,
         label: scoreLabel(score),
+        playersText,
+        teamName,
       },
-      "doubles.leaderboard": merged,
+    };
+
+    // rebuild leaderboard from submissions
+    const lb = Object.entries(newSubmissions).map(([id, s]) => ({
+      teamId: id,
+      teamName: s.teamName || "Team",
+      playersText: s.playersText || "",
+      score: Number(s.score ?? 0),
+    }));
+
+    lb.sort((a, b) => a.score - b.score);
+
+    await updateDoc(leagueRef, {
+      "doubles.submissions": newSubmissions,
+      "doubles.leaderboard": lb,
       "doubles.updatedAt": Date.now(),
     });
 
-    setSubmitMsgByCard((m) => ({
+    setSubmitMsgByTeam((m) => ({
       ...m,
-      [cardId]: `Submitted! Score: ${scoreLabel(score)}.`,
+      [teamId]: `Submitted! Score: ${scoreLabel(score)}.`,
     }));
     setTimeout(() => {
-      setSubmitMsgByCard((m) => ({ ...m, [cardId]: "" }));
+      setSubmitMsgByTeam((m) => ({ ...m, [teamId]: "" }));
     }, 2500);
   }
 
   async function saveStartingHoleEdits() {
-    return withAdminPassword("Save Starting Hole Edits", async () => {
+    await requireAdmin(async () => {
       const updatedCards = cards.map((c) => {
         const proposed = holeEdits[c.id];
         if (proposed === undefined || proposed === null || proposed === "")
@@ -488,9 +515,7 @@ export default function DoublesPage() {
         "doubles.updatedAt": Date.now(),
       });
       setEditHolesOpen(false);
-      setStartRoundMsgColor(COLORS.green);
-      setStartRoundMsg("✅ Starting holes updated.");
-      setTimeout(() => setStartRoundMsg(""), 2000);
+      alert("Starting holes updated.");
     });
   }
 
@@ -504,7 +529,7 @@ export default function DoublesPage() {
   }
 
   async function addLatePlayer() {
-    return withAdminPassword("Add Late Player", async () => {
+    await requireAdmin(async () => {
       setLateMsg("");
 
       const name = lateName.trim();
@@ -637,17 +662,6 @@ export default function DoublesPage() {
     cursor: "pointer",
   });
 
-  const dangerButton = {
-    padding: "14px 18px",
-    borderRadius: 14,
-    border: `2px solid ${COLORS.red}`,
-    background: COLORS.red,
-    color: "white",
-    fontWeight: 1000,
-    cursor: "pointer",
-    width: "100%",
-  };
-
   const input = {
     width: "100%",
     padding: "12px 12px",
@@ -687,7 +701,7 @@ export default function DoublesPage() {
           </div>
 
           {todayExpanded && (
-            <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               <div style={{ color: COLORS.muted, lineHeight: 1.35 }}>
                 <div>
                   <b>Format:</b> {formatSummary.fmtLabel}
@@ -698,15 +712,41 @@ export default function DoublesPage() {
                 <div style={{ marginTop: 6 }}>
                   <b>Layout:</b> {doubles.layoutNote ? doubles.layoutNote : "—"}
                 </div>
-                <div style={{ marginTop: 10, fontSize: 16 }}>
+                <div style={{ marginTop: 6 }}>
                   <b>Check-in:</b> {checkinStatus}
                 </div>
               </div>
+
+              {/* ✅ Make Teams & Cards moved HERE (bottom of Today's Format) */}
+              {!started && (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <button
+                    style={{
+                      padding: "14px 18px",
+                      borderRadius: 14,
+                      border: `2px solid ${COLORS.red}`,
+                      background: COLORS.red,
+                      color: "white",
+                      fontWeight: 1000,
+                      cursor: "pointer",
+                    }}
+                    onClick={handleStartRound}
+                  >
+                    Make Teams & Cards (Admin)
+                  </button>
+
+                  {!!startRoundMsg && (
+                    <div style={{ fontWeight: 900, color: startRoundMsgColor }}>
+                      {startRoundMsg}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        {/* 2) Player Check-in */}
+        {/* 2) Player Check-in (disappears after start) */}
         {!started && (
           <div style={{ marginTop: 14, ...cardStyle }}>
             <div
@@ -766,36 +806,27 @@ export default function DoublesPage() {
                   Check In
                 </button>
 
-                {/* ✅ Bigger checked-in text */}
                 {checkins.length > 0 ? (
                   <div
                     style={{
                       marginTop: 6,
-                      fontSize: 16,
-                      color: COLORS.navy,
-                      fontWeight: 900,
+                      fontSize: 15,
+                      color: COLORS.muted,
+                      fontWeight: 800,
                     }}
                   >
                     Checked in:{" "}
-                    <span style={{ color: COLORS.muted, fontWeight: 700 }}>
-                      {checkins
-                        .slice(-12)
-                        .map((p) => p.name)
-                        .join(", ")}
-                      {checkins.length > 12 ? "…" : ""}
-                    </span>
+                    {checkins
+                      .slice(-12)
+                      .map((p) => p.name)
+                      .join(", ")}
+                    {checkins.length > 12 ? "…" : ""}
                   </div>
                 ) : (
                   <div
                     style={{ marginTop: 6, fontSize: 14, color: COLORS.muted }}
                   >
                     Add players as they arrive.
-                  </div>
-                )}
-
-                {!!startRoundMsg && (
-                  <div style={{ fontWeight: 900, color: startRoundMsgColor }}>
-                    {startRoundMsg}
                   </div>
                 )}
               </div>
@@ -820,12 +851,13 @@ export default function DoublesPage() {
           ) : (
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
               {cards.map((c, idx) => {
-                const sub = submissions[c.id];
                 const isOpen = expandedCardId === c.id;
-                const statusText = sub
-                  ? `Submitted: ${sub.label}`
-                  : "Not submitted";
-                const statusColor = sub ? COLORS.green : COLORS.muted;
+
+                // card summary: how many teams submitted on this card?
+                const teamIds = (c.teams || []).map((t) => t.id);
+                const submittedCount = teamIds.filter(
+                  (id) => !!submissions[id]
+                ).length;
 
                 return (
                   <div
@@ -854,11 +886,11 @@ export default function DoublesPage() {
                         <div
                           style={{
                             fontSize: 12,
-                            color: statusColor,
+                            color: COLORS.muted,
                             fontWeight: 900,
                           }}
                         >
-                          {statusText}
+                          Teams submitted: {submittedCount}/{teamIds.length}
                         </div>
                       </div>
                       <div style={{ color: COLORS.muted, fontWeight: 800 }}>
@@ -873,62 +905,114 @@ export default function DoublesPage() {
                           borderTop: `1px solid ${COLORS.border}`,
                         }}
                       >
-                        <div style={{ display: "grid", gap: 8 }}>
-                          {(c.teams || []).map((t) => (
-                            <div
-                              key={t.id}
-                              style={{
-                                padding: 10,
-                                borderRadius: 14,
-                                background: "rgba(27,31,90,0.04)",
-                                border: `1px solid ${COLORS.border}`,
-                              }}
-                            >
-                              <div style={{ fontWeight: 1000 }}>
-                                {teamDisplay(t)}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
+                        <div style={{ display: "grid", gap: 10 }}>
+                          {(c.teams || []).map((t) => {
+                            const sub = submissions[t.id];
+                            const statusText = sub
+                              ? `Submitted: ${sub.label}`
+                              : "Not submitted";
+                            const statusColor = sub
+                              ? COLORS.green
+                              : COLORS.muted;
 
-                        <div
-                          style={{ marginTop: 12, ...cardStyle, padding: 12 }}
-                        >
-                          <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                            Log Round Score (Relative Par)
-                          </div>
-
-                          <div
-                            style={{ marginTop: 10, display: "grid", gap: 10 }}
-                          >
-                            <input
-                              style={input}
-                              type="number"
-                              min={-18}
-                              max={18}
-                              value={scoreDraftByCard[c.id] ?? 0}
-                              onChange={(e) =>
-                                setScoreDraftByCard((s) => ({
-                                  ...s,
-                                  [c.id]: e.target.value,
-                                }))
-                              }
-                            />
-                            <button
-                              style={button(true)}
-                              onClick={() => submitCardScore(c.id)}
-                            >
-                              Submit Score
-                            </button>
-
-                            {!!submitMsgByCard[c.id] && (
+                            return (
                               <div
-                                style={{ fontWeight: 900, color: COLORS.green }}
+                                key={t.id}
+                                style={{
+                                  padding: 12,
+                                  borderRadius: 14,
+                                  background: "rgba(27,31,90,0.04)",
+                                  border: `1px solid ${COLORS.border}`,
+                                }}
                               >
-                                {submitMsgByCard[c.id]}
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ minWidth: 0 }}>
+                                    <div
+                                      style={{
+                                        fontWeight: 1000,
+                                        color: COLORS.navy,
+                                      }}
+                                    >
+                                      {teamDisplay(t)}
+                                    </div>
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        color: statusColor,
+                                        fontWeight: 900,
+                                      }}
+                                    >
+                                      {statusText}
+                                    </div>
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontWeight: 1000,
+                                      color: COLORS.navy,
+                                    }}
+                                  >
+                                    {sub ? sub.label : ""}
+                                  </div>
+                                </div>
+
+                                {/* ✅ Team score input + submit */}
+                                <div
+                                  style={{
+                                    marginTop: 10,
+                                    display: "grid",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      color: COLORS.muted,
+                                      fontWeight: 900,
+                                    }}
+                                  >
+                                    Team Score (Relative Par)
+                                  </div>
+                                  <input
+                                    style={input}
+                                    type="number"
+                                    min={-18}
+                                    max={18}
+                                    value={scoreDraftByTeam[t.id] ?? ""}
+                                    onChange={(e) =>
+                                      setScoreDraftByTeam((s) => ({
+                                        ...s,
+                                        [t.id]: e.target.value,
+                                      }))
+                                    }
+                                    placeholder="ex: -2, 0, +4"
+                                  />
+                                  <button
+                                    style={button(true)}
+                                    onClick={() => submitTeamScore(t.id)}
+                                  >
+                                    Submit Team Score
+                                  </button>
+
+                                  {!!submitMsgByTeam[t.id] && (
+                                    <div
+                                      style={{
+                                        fontWeight: 900,
+                                        color: COLORS.green,
+                                      }}
+                                    >
+                                      {submitMsgByTeam[t.id]}
+                                    </div>
+                                  )}
+                                </div>
                               </div>
-                            )}
-                          </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -939,7 +1023,7 @@ export default function DoublesPage() {
           )}
         </div>
 
-        {/* 4) Leaderboard (only after started; placed above Admin) */}
+        {/* 4) Leaderboard (only after started; above Admin) */}
         {started && (
           <div style={{ marginTop: 14, ...cardStyle }}>
             <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
@@ -983,7 +1067,7 @@ export default function DoublesPage() {
           </div>
         )}
 
-        {/* 5) Admin (no unlock; password only on actions) */}
+        {/* 5) Admin */}
         <div style={{ marginTop: 14, ...cardStyle }}>
           <div
             style={sectionTitleRow}
@@ -1089,20 +1173,12 @@ export default function DoublesPage() {
                 </div>
               </div>
 
-              {/* Start round / Make Teams */}
-              {!started && (
-                <button style={dangerButton} onClick={makeTeamsAndCards}>
-                  Make Teams & Cards (Admin)
-                </button>
-              )}
-
               {/* Late player */}
               {started && (
                 <div style={{ ...cardStyle, padding: 12 }}>
                   <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                    Add Late Player
+                    Add Late Player (Admin)
                   </div>
-
                   <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                     <input
                       style={input}
@@ -1138,18 +1214,26 @@ export default function DoublesPage() {
                       </div>
                     )}
 
-                    <select
-                      style={input}
-                      value={lateCardId}
-                      onChange={(e) => setLateCardId(e.target.value)}
-                    >
-                      <option value="">Select card…</option>
-                      {cards.map((c, i) => (
-                        <option key={c.id} value={c.id}>
-                          Card {i + 1} (Start Hole {c.startHole})
-                        </option>
-                      ))}
-                    </select>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontSize: 12, color: COLORS.muted }}>
+                        If there’s an unpaired Cali already on a card, the late
+                        player becomes their teammate. Otherwise, the late
+                        player is added as a Cali on the selected card.
+                      </div>
+
+                      <select
+                        style={input}
+                        value={lateCardId}
+                        onChange={(e) => setLateCardId(e.target.value)}
+                      >
+                        <option value="">Select card…</option>
+                        {cards.map((c, i) => (
+                          <option key={c.id} value={c.id}>
+                            Card {i + 1} (Start Hole {c.startHole})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
                     <button style={button(true)} onClick={addLatePlayer}>
                       Add Late Player (Admin)
@@ -1168,7 +1252,7 @@ export default function DoublesPage() {
               {started && cards.length > 0 && (
                 <div style={{ ...cardStyle, padding: 12 }}>
                   <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                    Starting Holes
+                    Starting Holes (Admin)
                   </div>
 
                   {!editHolesOpen ? (
@@ -1232,9 +1316,22 @@ export default function DoublesPage() {
                 </div>
               )}
 
-              <button style={dangerButton} onClick={eraseDoublesInfo}>
-                Erase Doubles Information (Admin)
-              </button>
+              <div style={{ display: "flex", justifyContent: "center" }}>
+                <button
+                  style={{
+                    padding: "14px 18px",
+                    borderRadius: 14,
+                    border: `2px solid ${COLORS.red}`,
+                    background: "#fff5f5",
+                    fontWeight: 1000,
+                    cursor: "pointer",
+                    minWidth: 260,
+                  }}
+                  onClick={eraseDoublesInfo}
+                >
+                  Erase Doubles Information (Admin)
+                </button>
+              </div>
             </div>
           )}
         </div>
