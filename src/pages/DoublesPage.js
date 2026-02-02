@@ -1,3 +1,4 @@
+// src/pages/DoublesPage.js
 import React, { useEffect, useMemo, useState } from "react";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
@@ -12,10 +13,10 @@ import {
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.6.1-doubles-cali";
+const APP_VERSION = "v1.6.2-doubles-reorder";
 
 function uid() {
-  return Math.random().toString(36).substring(2, 10);
+  return Math.random().toString(36).slice(2, 10);
 }
 
 function shuffle(arr) {
@@ -27,768 +28,831 @@ function shuffle(arr) {
   return a;
 }
 
-function startHoleForCardIndex(i) {
-  // 1, 3, 5, ... wrap at 18
-  const hole = ((1 + 2 * i - 1) % 18) + 1;
-  return hole;
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
 }
 
-function clampScore(v) {
-  const n = Number(v);
-  if (Number.isNaN(n)) return 0;
-  return Math.max(-18, Math.min(18, Math.trunc(n)));
+function normalizeName(s) {
+  return (s || "").trim().replace(/\s+/g, " ");
 }
 
-function caliKeyForPlayer(playerId) {
-  return `cali_${playerId}`;
+function isValidName(s) {
+  return normalizeName(s).length >= 2;
+}
+
+function range(min, max) {
+  const a = [];
+  for (let i = min; i <= max; i++) a.push(i);
+  return a;
+}
+
+function toLabelPar(n) {
+  if (n === 0) return "E";
+  return n > 0 ? `+${n}` : `${n}`;
 }
 
 export default function DoublesPage() {
-  // --- Palette / look (match Putting / Tags vibe) ---
   const COLORS = {
-    navy: "#1b1f5a",
     blueLight: "#e6f3ff",
+    navy: "#1b1f5a",
     orange: "#f4a83a",
-    green: "#15803d",
-    red: "#cc0000",
-    text: "#0b1220",
-    border: "#dbe9ff",
-    panel: "#ffffff",
-    soft: "#f6fbff",
-  };
-
-  const inputStyle = {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: `1px solid ${COLORS.border}`,
-    outline: "none",
-    fontSize: 14,
-  };
-
-  const buttonStyle = {
-    padding: "10px 14px",
-    borderRadius: 12,
-    border: `1px solid ${COLORS.border}`,
-    background: COLORS.orange,
-    color: "#1a1a1a",
-    fontWeight: 900,
-    cursor: "pointer",
-  };
-
-  const smallButtonStyle = {
-    ...buttonStyle,
-    padding: "8px 12px",
-    fontWeight: 900,
+    green: "#2f8f2f",
+    red: "#c0392b",
+    gray: "#5b5b5b",
+    cardBg: "#ffffff",
+    shadow: "0 8px 24px rgba(0,0,0,0.08)",
   };
 
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
+  const [loaded, setLoaded] = useState(false);
+  const [league, setLeague] = useState(null);
 
-  // --- Doubles league Firestore shape ---
-  const [doubles, setDoubles] = useState({
-    settings: {
-      format: "random", // "random" | "seated"
-      locked: false,
-      finalized: false,
-      caliMode: "auto", // "auto" | "manual"
-    },
-    layoutNote: "",
-    players: [], // {id,name, group:"A"|"B" (only for seated)}
-    caliPlayerId: "", // picked/assigned when odd players
-    teams: [], // {id, name, playerIds:[p1,p2]}
-    cards: [], // {id, name, teamIds:[...], startHole:number, caliPlayerId?:string}
-    scores: {}, // scores[teamId] = -18..18 ; scores[caliKey] = -18..18
-    submitted: {}, // submitted[cardId] = true
-    adjustments: {}, // adjustments[rowId] = delta (rowId = teamId or caliKey)
-  });
+  // UI toggles
+  const [showCards, setShowCards] = useState(true);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
-  // UI state
-  const [adminOpen, setAdminOpen] = useState(true);
-  const [checkinOpen, setCheckinOpen] = useState(true);
-  const [cardsOpen, setCardsOpen] = useState(true);
-  const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
+  // Admin auth
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const [adminPwInput, setAdminPwInput] = useState("");
 
-  const [editOpen, setEditOpen] = useState(false);
+  // Player check-in
+  const [checkInName, setCheckInName] = useState("");
+  const [checkInPool, setCheckInPool] = useState("A"); // for seated doubles
 
-  // check-in UI
-  const [name, setName] = useState("");
-  const [group, setGroup] = useState("A"); // for seated
+  // Card scoring
+  const [scoreInputs, setScoreInputs] = useState({}); // { [cardId]: { [teamId]: parInt } }
+  const [submitStatus, setSubmitStatus] = useState({}); // { [cardId]: "ok" | "err" | "" }
 
-  // per-card expansion
-  const [openCards, setOpenCards] = useState({}); // {cardId: bool}
+  // Admin edit start holes
+  const [editStartHolesMode, setEditStartHolesMode] = useState(false);
+  const [startHoleEdits, setStartHoleEdits] = useState({}); // { [cardId]: number }
 
-  // ---------- Derived ----------
-  const settings = doubles.settings || {};
-  const format = String(settings.format || "random"); // random | seated
-  const locked = !!settings.locked;
-  const finalized = !!settings.finalized;
-  const caliMode = String(settings.caliMode || "auto"); // auto | manual
+  // Admin: layout text
+  const [layoutDraft, setLayoutDraft] = useState("");
 
-  const players = Array.isArray(doubles.players) ? doubles.players : [];
-  const caliPlayerId = String(doubles.caliPlayerId || "");
-  const teams = Array.isArray(doubles.teams) ? doubles.teams : [];
-  const cards = Array.isArray(doubles.cards) ? doubles.cards : [];
-  const scores =
-    doubles.scores && typeof doubles.scores === "object" ? doubles.scores : {};
-  const submitted =
-    doubles.submitted && typeof doubles.submitted === "object"
-      ? doubles.submitted
-      : {};
-  const adjustments =
-    doubles.adjustments && typeof doubles.adjustments === "object"
-      ? doubles.adjustments
-      : {};
-  const layoutNote = String(doubles.layoutNote || "");
+  // Basic button style
+  const buttonStyle = {
+    padding: "12px 14px",
+    borderRadius: 14,
+    border: `2px solid ${COLORS.navy}`,
+    fontWeight: 900,
+    cursor: "pointer",
+    background: COLORS.orange,
+    color: "#1a1a1a",
+  };
 
-  const isOddPlayers = players.length % 2 === 1;
+  const subtleButton = {
+    ...buttonStyle,
+    background: "#fff",
+  };
 
-  const playerById = useMemo(() => {
-    const map = {};
-    players.forEach((p) => (map[p.id] = p));
-    return map;
-  }, [players]);
+  const dangerButton = {
+    ...buttonStyle,
+    background: "#ffecec",
+    border: `2px solid ${COLORS.red}`,
+    color: COLORS.red,
+  };
 
-  const teamById = useMemo(() => {
-    const map = {};
-    teams.forEach((t) => (map[t.id] = t));
-    return map;
-  }, [teams]);
+  // Helpers to read doubles state
+  const doubles = league?.doubles || {};
+  const settings = doubles?.settings || {};
+  const checkIns = doubles?.checkIns || []; // [{ id, name, pool, checkedInAt }]
+  const cards = doubles?.cards || []; // [{ id, startHole, teams: [team], submittedAt? }]
+  const teams = doubles?.teams || []; // [{ id, name, players[], poolMeta? , cali? }]
+  const submissions = doubles?.submissions || {}; // { [teamId]: { teamId, teamName, par, submittedAt, cardId } }
+  const leaderboard = useMemo(() => {
+    const list = Object.values(submissions || {});
+    list.sort(
+      (a, b) =>
+        (a.par ?? 9999) - (b.par ?? 9999) ||
+        (a.teamName || "").localeCompare(b.teamName || "")
+    );
+    return list;
+  }, [submissions]);
 
-  function baseScoreForRow(rowId) {
-    const raw = scores?.[rowId];
-    if (raw === undefined || raw === null || raw === "") return null;
-    const n = Number(raw);
-    return Number.isNaN(n) ? null : n;
-  }
+  const hasSubmissions = leaderboard.length > 0;
 
-  function finalScoreForRow(rowId) {
-    const base = baseScoreForRow(rowId);
-    const baseNum = base === null ? null : Number(base);
-    const adj = Number(adjustments?.[rowId] ?? 0) || 0;
-    if (baseNum === null) return null;
-    return baseNum + adj;
-  }
-
-  function submittedCount() {
-    const total = cards.length;
-    const s = cards.filter((c) => !!submitted?.[c.id]).length;
-    return { submitted: s, total };
-  }
-
-  function missingCards() {
-    return cards.filter((c) => !submitted?.[c.id]);
-  }
-
-  const canFinalize =
-    locked &&
-    !finalized &&
-    cards.length > 0 &&
-    submittedCount().submitted === submittedCount().total;
-
-  // After locked, collapse check-in/admin by default (like Putting)
+  // Auto behavior requested:
+  // - Leaderboard should be above Admin tools by default
+  // - Once cards start submitting, leaderboard should expand directly under Layout at the top
   useEffect(() => {
-    if (locked) {
-      setCheckinOpen(false);
-      setAdminOpen(false);
-    }
-  }, [locked]);
+    if (hasSubmissions) setShowLeaderboard(true);
+  }, [hasSubmissions]);
 
-  // ---------- Admin password gate ----------
-  function requireAdmin(fn) {
-    const pw = window.prompt("Admin password:");
-    if (pw !== ADMIN_PASSWORD) {
-      alert("Wrong password.");
-      return;
-    }
-    return fn();
-  }
-
-  // ---------- Firestore bootstrap/subscribe ----------
+  // Firestore live sync
   useEffect(() => {
-    let unsub = () => {};
-
+    let unsub = null;
     (async () => {
       await ensureAnonAuth();
-
-      const snap = await getDoc(leagueRef);
-      if (!snap.exists()) {
-        await setDoc(leagueRef, {
-          players: [],
-          rounds: [],
-          roundHistory: [],
-          defendMode: {
-            enabled: false,
-            scope: "podium",
-            durationType: "weeks",
-            weeks: 2,
-            tagExpiresAt: {},
-          },
-          puttingLeague: {
-            settings: {
-              stations: 1,
-              rounds: 1,
-              locked: false,
-              currentRound: 0,
-              finalized: false,
-              cardMode: "",
-            },
-            players: [],
-            cardsByRound: {},
-            scores: {},
-            submitted: {},
-            adjustments: {},
-          },
-          doublesLeague: {
-            settings: { format: "random", locked: false, finalized: false, caliMode: "auto" },
-            layoutNote: "",
-            players: [],
-            caliPlayerId: "",
-            teams: [],
-            cards: [],
-            scores: {},
-            submitted: {},
-            adjustments: {},
-          },
-        });
-      }
-
-      unsub = onSnapshot(leagueRef, (s) => {
-        const data = s.data() || {};
-        const dl = data.doublesLeague || {};
-
-        const safe = {
-          settings: {
-            format: "random",
-            locked: false,
-            finalized: false,
-            caliMode: "auto",
-            ...(dl.settings || {}),
-          },
-          layoutNote: dl.layoutNote || "",
-          players: Array.isArray(dl.players) ? dl.players : [],
-          caliPlayerId: dl.caliPlayerId || "",
-          teams: Array.isArray(dl.teams) ? dl.teams : [],
-          cards: Array.isArray(dl.cards) ? dl.cards : [],
-          scores: dl.scores && typeof dl.scores === "object" ? dl.scores : {},
-          submitted: dl.submitted && typeof dl.submitted === "object" ? dl.submitted : {},
-          adjustments:
-            dl.adjustments && typeof dl.adjustments === "object" ? dl.adjustments : {},
-        };
-
-        setDoubles(safe);
-      });
-    })().catch(console.error);
-
-    return () => unsub();
+      unsub = onSnapshot(
+        leagueRef,
+        async (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            setLeague(data);
+            setLoaded(true);
+            setLayoutDraft(data?.doubles?.layoutText || "");
+          } else {
+            // initialize minimal doc
+            const base = {
+              appMeta: { createdAt: Date.now() },
+              doubles: {
+                appVersion: APP_VERSION,
+                settings: {
+                  format: "random", // "random" | "seated"
+                  holesStartAt: 1,
+                  holeSpacing: 2,
+                  teamsPerCard: 2, // default 2 teams (4 players). With Cali scenario may become 3 teams.
+                  caliMode: "random", // "random" | "manual"
+                  manualCaliPlayerId: "",
+                },
+                layoutText: "",
+                checkIns: [],
+                teams: [],
+                cards: [],
+                submissions: {},
+              },
+            };
+            await setDoc(leagueRef, base, { merge: true });
+          }
+        },
+        (err) => {
+          console.error("Doubles snapshot error:", err);
+          setLoaded(true);
+        }
+      );
+    })();
+    return () => unsub && unsub();
   }, [leagueRef]);
 
-  async function updateDoubles(patch) {
-    await updateDoc(leagueRef, {
-      doublesLeague: {
-        ...doubles,
-        ...patch,
-      },
+  // Derived status: who hasn't submitted yet (by team)
+  const unsubmittedTeams = useMemo(() => {
+    const t = teams || [];
+    const sub = submissions || {};
+    return t.filter((x) => !sub[x.id]);
+  }, [teams, submissions]);
+
+  // Keep startHole edits in sync when entering edit mode
+  useEffect(() => {
+    if (!editStartHolesMode) return;
+    const map = {};
+    (cards || []).forEach((c) => {
+      map[c.id] = c.startHole ?? 1;
     });
+    setStartHoleEdits(map);
+  }, [editStartHolesMode, cards]);
+
+  // If no cards exist, show cards section expanded by default
+  useEffect(() => {
+    if ((cards || []).length === 0) setShowCards(true);
+  }, [cards]);
+
+  // --- Admin auth ---
+  function requireAdmin() {
+    if (adminAuthed) return true;
+    const pw = window.prompt("Admin password:");
+    if (pw === ADMIN_PASSWORD) {
+      setAdminAuthed(true);
+      return true;
+    }
+    window.alert("Incorrect password.");
+    return false;
   }
 
-  async function updateDoublesDot(dotPath, value) {
-    await updateDoc(leagueRef, {
-      [`doublesLeague.${dotPath}`]: value,
-    });
+  async function updateDoubles(pathObj) {
+    await updateDoc(leagueRef, pathObj);
   }
 
-  // ---------- Admin actions ----------
-  async function setFormat(next) {
-    if (locked || finalized) return;
-    await updateDoubles({
-      settings: { ...settings, format: next },
-      // if switching formats before check-in, also clear cali assignment
-      caliPlayerId: "",
-    });
-  }
-
-  async function setCaliMode(next) {
-    if (locked || finalized) return;
-    await updateDoubles({
-      settings: { ...settings, caliMode: next },
-      caliPlayerId: "",
-    });
-  }
-
-  async function setCaliPlayerManual(playerId) {
-    if (locked || finalized) return;
-    await requireAdmin(async () => {
-      await updateDoubles({ caliPlayerId: playerId || "" });
-    });
-  }
-
-  async function saveLayoutNote(v) {
-    await updateDoubles({ layoutNote: v });
-  }
-
-  async function addPlayer() {
-    if (finalized) {
-      alert("Doubles is finalized. Reset Doubles to start over.");
+  // --- Player check-in ---
+  async function handleCheckIn() {
+    const name = normalizeName(checkInName);
+    if (!isValidName(name)) {
+      window.alert("Enter a name (2+ characters).");
       return;
     }
-    if (locked) return;
 
-    const n = (name || "").trim();
-    if (!n) return;
+    const format = settings.format || "random";
+    const pool = format === "seated" ? checkInPool : "";
 
-    const exists = players.some(
-      (p) => (p.name || "").trim().toLowerCase() === n.toLowerCase()
+    const already = (checkIns || []).some(
+      (p) => normalizeName(p.name).toLowerCase() === name.toLowerCase()
     );
-    if (exists) {
-      alert("That name is already checked in.");
+    if (already) {
+      window.alert("That name is already checked in.");
       return;
     }
 
-    const newPlayer = {
-      id: uid(),
-      name: n,
-      group: format === "seated" ? (group || "A") : undefined,
-    };
+    const next = [
+      ...(checkIns || []),
+      { id: uid(), name, pool, checkedInAt: Date.now() },
+    ];
 
-    await updateDoubles({ players: [...players, newPlayer] });
-    setName("");
-    setGroup("A");
+    await updateDoubles({
+      "doubles.checkIns": next,
+    });
+
+    setCheckInName("");
   }
 
-  // ---------- Cali picking ----------
-  function pickCaliAuto(allPlayers) {
-    if (allPlayers.length % 2 === 0) return ""; // no cali needed
+  // --- Cali logic ---
+  function pickCaliIfNeeded(players, format, caliMode, manualId) {
+    // Return { playersWithoutCali, caliPlayer|null }
+    if (!players || players.length === 0)
+      return { playersWithoutCali: [], caliPlayer: null };
+
+    // For seated doubles, cali should be from the pool that has odd count
     if (format === "seated") {
-      const A = allPlayers.filter((p) => (p.group || "A") === "A");
-      const B = allPlayers.filter((p) => (p.group || "A") === "B");
-      // choose from whichever pool has the odd extra player
-      const poolToPick =
-        A.length % 2 === 1 ? "A" : B.length % 2 === 1 ? "B" : "A";
-      const candidates = allPlayers.filter((p) => (p.group || "A") === poolToPick);
-      return shuffle(candidates)[0]?.id || allPlayers[0]?.id || "";
-    }
-    // random format: random player
-    return shuffle(allPlayers)[0]?.id || "";
-  }
+      const A = players.filter((p) => p.pool === "A");
+      const B = players.filter((p) => p.pool === "B");
+      const oddPool =
+        A.length % 2 === 1 ? "A" : B.length % 2 === 1 ? "B" : null;
 
-  function getEffectiveCaliPlayerId(allPlayers) {
-    if (allPlayers.length % 2 === 0) return "";
-    if (caliMode === "manual") {
-      // if admin chose someone valid
-      if (caliPlayerId && allPlayers.some((p) => p.id === caliPlayerId)) return caliPlayerId;
-      // otherwise not chosen yet
-      return "";
-    }
-    // auto
-    return pickCaliAuto(allPlayers);
-  }
+      if (!oddPool) return { playersWithoutCali: players, caliPlayer: null };
 
-  // ---------- Team building ----------
-  function buildTeamsFromPlayers(allPlayers, effectiveCaliId) {
-    const pool = allPlayers.filter((p) => p.id !== effectiveCaliId);
-
-    if (pool.length < 4) {
-      return { ok: false, reason: "Not enough players to create teams." };
-    }
-    if (pool.length % 2 !== 0) {
-      return { ok: false, reason: "Internal error: non-cali players must be even." };
-    }
-
-    if (format === "random") {
-      const shuffled = shuffle(pool);
-      const built = [];
-      for (let i = 0; i < shuffled.length; i += 2) {
-        built.push({
-          id: uid(),
-          name: `Team ${built.length + 1}`,
-          playerIds: [shuffled[i].id, shuffled[i + 1].id],
-        });
+      if (caliMode === "manual" && manualId) {
+        const selected = players.find(
+          (p) => p.id === manualId && p.pool === oddPool
+        );
+        if (selected) {
+          return {
+            caliPlayer: selected,
+            playersWithoutCali: players.filter((p) => p.id !== selected.id),
+          };
+        }
+        // If manual invalid, fallback to random within odd pool
       }
-      return { ok: true, teams: built };
-    }
 
-    // seated: pair A with B where possible
-    const A = pool.filter((p) => (p.group || "A") === "A");
-    const B = pool.filter((p) => (p.group || "A") === "B");
-
-    if (A.length === 0 || B.length === 0) {
-      return { ok: false, reason: "Seated Doubles needs at least one A and one B (after Cali)." };
-    }
-
-    const a = shuffle(A);
-    const b = shuffle(B);
-
-    const built = [];
-    const pairs = Math.min(a.length, b.length);
-    for (let i = 0; i < pairs; i++) {
-      built.push({
-        id: uid(),
-        name: `Team ${built.length + 1}`,
-        playerIds: [a[i].id, b[i].id],
-      });
-    }
-
-    // leftovers pair together (best-effort) so we still have even teams
-    const leftovers = a.slice(pairs).concat(b.slice(pairs));
-    if (leftovers.length % 2 !== 0) {
+      const poolPlayers = players.filter((p) => p.pool === oddPool);
+      const chosen =
+        poolPlayers[Math.floor(Math.random() * poolPlayers.length)];
       return {
-        ok: false,
-        reason:
-          "Uneven leftovers after pairing. Add one more player or adjust A/B check-in.",
+        caliPlayer: chosen,
+        playersWithoutCali: players.filter((p) => p.id !== chosen.id),
       };
     }
 
-    const l = shuffle(leftovers);
-    for (let i = 0; i < l.length; i += 2) {
-      built.push({
-        id: uid(),
-        name: `Team ${built.length + 1}`,
-        playerIds: [l[i].id, l[i + 1].id],
-      });
+    // Random doubles: only if odd total
+    if (players.length % 2 === 0)
+      return { playersWithoutCali: players, caliPlayer: null };
+
+    if (caliMode === "manual" && manualId) {
+      const selected = players.find((p) => p.id === manualId);
+      if (selected) {
+        return {
+          caliPlayer: selected,
+          playersWithoutCali: players.filter((p) => p.id !== selected.id),
+        };
+      }
     }
 
-    return { ok: true, teams: built };
+    const chosen = players[Math.floor(Math.random() * players.length)];
+    return {
+      caliPlayer: chosen,
+      playersWithoutCali: players.filter((p) => p.id !== chosen.id),
+    };
   }
 
-  // ---------- Card building ----------
-  function buildCards(builtTeams, effectiveCaliId) {
-    // Rules:
-    // - no single team card
-    // - cali cannot be alone
-    // - allowed:
-    //   * 2 teams (4)
-    //   * 2 teams + cali (5)
-    //   * 1 team + cali (3)
-    //   * 3 teams (6)
-    const t = [...builtTeams];
-    const cardsOut = [];
-    let caliPlaced = false;
+  function buildTeamsFromCheckins() {
+    const format = settings.format || "random";
+    const caliMode = settings.caliMode || "random";
+    const manualCaliPlayerId = settings.manualCaliPlayerId || "";
 
-    // make 2-team cards as much as possible
-    while (t.length >= 2) {
-      const chunk = t.splice(0, 2);
-      cardsOut.push({
-        id: uid(),
-        name: `Card ${cardsOut.length + 1}`,
-        teamIds: chunk.map((x) => x.id),
-        startHole: startHoleForCardIndex(cardsOut.length),
-        caliPlayerId: "",
-      });
-    }
+    let players = (checkIns || []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      pool: p.pool || "",
+    }));
 
-    // leftover single team
-    if (t.length === 1) {
-      const leftoverTeam = t[0];
+    // Decide cali player (if needed / possible)
+    const { caliPlayer, playersWithoutCali } = pickCaliIfNeeded(
+      players,
+      format,
+      caliMode,
+      manualCaliPlayerId
+    );
 
-      if (effectiveCaliId && !caliPlaced) {
-        // Make "1 team + Cali" card (3 people) — allowed
-        cardsOut.push({
+    players = playersWithoutCali;
+
+    const createdTeams = [];
+
+    if (format === "seated") {
+      const A = shuffle(players.filter((p) => p.pool === "A"));
+      const B = shuffle(players.filter((p) => p.pool === "B"));
+
+      // Create paired teams A[i] + B[i]
+      const n = Math.min(A.length, B.length);
+      for (let i = 0; i < n; i++) {
+        createdTeams.push({
           id: uid(),
-          name: `Card ${cardsOut.length + 1}`,
-          teamIds: [leftoverTeam.id],
-          startHole: startHoleForCardIndex(cardsOut.length),
-          caliPlayerId: effectiveCaliId,
+          players: [A[i].name, B[i].name],
+          teamName: `${A[i].name} / ${B[i].name}`,
+          cali: false,
+          poolMeta: "A+B",
         });
-        caliPlaced = true;
-      } else {
-        // No cali to pair with => must merge into last card to make 3 teams
-        if (cardsOut.length === 0) {
-          return { ok: false, reason: "Cannot create a card with only one team." };
+      }
+
+      // Any leftovers (should not happen if cali handled correctly, but guard)
+      const leftovers = [...A.slice(n), ...B.slice(n)];
+      if (leftovers.length > 0) {
+        // Add them as "Cali" single team members if possible by merging into cards later
+        leftovers.forEach((x) => {
+          createdTeams.push({
+            id: uid(),
+            players: [x.name],
+            teamName: `${x.name} (Cali)`,
+            cali: true,
+            poolMeta: x.pool,
+          });
+        });
+      }
+    } else {
+      // random doubles: pair sequentially after shuffle
+      const s = shuffle(players);
+      for (let i = 0; i < s.length; i += 2) {
+        const p1 = s[i];
+        const p2 = s[i + 1];
+        if (!p2) break;
+        createdTeams.push({
+          id: uid(),
+          players: [p1.name, p2.name],
+          teamName: `${p1.name} / ${p2.name}`,
+          cali: false,
+          poolMeta: "",
+        });
+      }
+    }
+
+    // Add cali player as a special single-member team if present
+    let caliTeam = null;
+    if (caliPlayer) {
+      caliTeam = {
+        id: uid(),
+        players: [caliPlayer.name],
+        teamName: `${caliPlayer.name} (Cali)`,
+        cali: true,
+        poolMeta: format === "seated" ? caliPlayer.pool : "",
+      };
+    }
+
+    return { createdTeams, caliTeam };
+  }
+
+  function assignCardsFromTeams(createdTeams, caliTeam) {
+    const holeStartAt = Number(settings.holesStartAt ?? 1);
+    const spacing = Number(settings.holeSpacing ?? 2);
+    const baseTeamsPerCard = Number(settings.teamsPerCard ?? 2);
+
+    // Rule: no card can have a single team.
+    // Typically: 2 teams per card.
+    // If cali exists: cali can be added to an existing card making 3 teams on that card.
+    // Also, if numbers make it necessary, allow 3 teams on a card (6 players) so no one is alone.
+
+    let teamsList = [...(createdTeams || [])];
+
+    // If any “cali true” teams exist in createdTeams (from weird leftovers), treat them like caliTeam
+    const caliSingles = teamsList.filter(
+      (t) => t.cali && t.players.length === 1
+    );
+    teamsList = teamsList.filter((t) => !(t.cali && t.players.length === 1));
+
+    // Prefer explicit caliTeam
+    let cali = caliTeam || (caliSingles.length ? caliSingles[0] : null);
+
+    // Group into cards with baseTeamsPerCard
+    const newCards = [];
+    let idx = 0;
+    while (idx < teamsList.length) {
+      const slice = teamsList.slice(idx, idx + baseTeamsPerCard);
+      idx += baseTeamsPerCard;
+      if (slice.length === 1) {
+        // Can't have a card with 1 team — merge into previous card if possible
+        if (newCards.length > 0) {
+          newCards[newCards.length - 1].teams.push(slice[0]);
+        } else {
+          // Should not happen, but safeguard by holding for later
+          // Add to cali if none (effectively becomes cali-ish)
+          if (!cali) {
+            cali = {
+              id: uid(),
+              players: slice[0].players,
+              teamName: `${slice[0].teamName} (Cali)`,
+              cali: true,
+              poolMeta: slice[0].poolMeta || "",
+            };
+          } else {
+            // merge players into cali label (still single team-ish) - not ideal, but avoids "solo card"
+            cali.players = [...new Set([...cali.players, ...slice[0].players])];
+            cali.teamName = `${cali.players.join(" / ")} (Cali)`;
+          }
         }
-        const last = cardsOut[cardsOut.length - 1];
-        last.teamIds = [...(last.teamIds || []), leftoverTeam.id]; // 3 teams (6 people)
+      } else {
+        newCards.push({
+          id: uid(),
+          teams: slice,
+          startHole: holeStartAt + newCards.length * spacing,
+          createdAt: Date.now(),
+        });
       }
     }
 
-    // if cali exists and not placed yet:
-    if (effectiveCaliId && !caliPlaced) {
-      // Prefer adding to a 2-team card (becomes 5 people)
-      const target =
-        cardsOut.find((c) => (c.teamIds || []).length === 2 && !c.caliPlayerId) ||
-        cardsOut.find((c) => (c.teamIds || []).length === 1 && !c.caliPlayerId) ||
-        null;
-
-      if (!target) {
-        return { ok: false, reason: "No valid card to place Cali on." };
-      }
-      target.caliPlayerId = effectiveCaliId;
-      caliPlaced = true;
-    }
-
-    // validate no single-team without cali
-    for (const c of cardsOut) {
-      const teamsCount = (c.teamIds || []).length;
-      const hasCali = !!c.caliPlayerId;
-      if (teamsCount === 1 && !hasCali) {
-        return { ok: false, reason: "A card would have only one team without Cali (not allowed)." };
-      }
-      if (teamsCount === 0) {
-        return { ok: false, reason: "A card has no teams." };
+    // If cali exists, attach cali to a card (making 3 teams / 5 people) OR pair cali with another “single team” is not allowed.
+    // Best: add cali to the first card (or the last card) to create a 3-team card.
+    if (cali) {
+      if (newCards.length === 0) {
+        // If no cards exist, can't proceed properly
+        // Put cali as a team, but still need at least 2 teams total to create a card; caller should guard.
+        newCards.push({
+          id: uid(),
+          teams: [cali],
+          startHole: holeStartAt,
+          createdAt: Date.now(),
+        });
+      } else {
+        // Add cali to the smallest card (prefer 2-team cards)
+        const target =
+          newCards.find((c) => (c.teams || []).length === 2) || newCards[0];
+        target.teams.push(cali);
       }
     }
 
-    return { ok: true, cards: cardsOut };
+    // Final safeguard: remove any card that somehow has 1 team by merging forward/back
+    for (let i = 0; i < newCards.length; i++) {
+      if ((newCards[i].teams || []).length < 2) {
+        if (i > 0) {
+          newCards[i - 1].teams = [
+            ...newCards[i - 1].teams,
+            ...newCards[i].teams,
+          ];
+          newCards.splice(i, 1);
+          i--;
+        } else if (newCards.length > 1) {
+          newCards[i + 1].teams = [
+            ...newCards[i + 1].teams,
+            ...newCards[i].teams,
+          ];
+          newCards.splice(i, 1);
+          i--;
+        }
+      }
+    }
+
+    return newCards;
   }
 
-  async function makeTeamsAndCards() {
-    if (finalized) return;
-    if (locked) {
-      alert("Teams are already created. Reset Doubles to start fresh.");
+  async function adminMakeTeamsAndCards() {
+    if (!requireAdmin()) return;
+
+    if ((checkIns || []).length < 4) {
+      window.alert("Need at least 4 players checked in to make teams.");
       return;
     }
 
-    if (players.length < 4) {
-      alert("Check in at least 4 players first.");
-      return;
+    // If seated doubles, need at least one A and one B
+    if ((settings.format || "random") === "seated") {
+      const A = (checkIns || []).filter((p) => p.pool === "A").length;
+      const B = (checkIns || []).filter((p) => p.pool === "B").length;
+      if (A < 1 || B < 1) {
+        window.alert("Seated Doubles requires players in both pools A and B.");
+        return;
+      }
     }
 
-    // determine cali if needed
-    const effectiveCaliId = getEffectiveCaliPlayerId(players);
+    const { createdTeams, caliTeam } = buildTeamsFromCheckins();
+    const newCards = assignCardsFromTeams(createdTeams, caliTeam);
 
-    if (players.length % 2 === 1 && caliMode === "manual" && !effectiveCaliId) {
-      alert("Odd number of players: please select a Cali player (Admin Tools).");
-      return;
-    }
-
-    // build teams from non-cali players
-    const teamsRes = buildTeamsFromPlayers(players, effectiveCaliId);
-    if (!teamsRes.ok) {
-      alert(teamsRes.reason);
-      return;
-    }
-
-    const builtTeams = teamsRes.teams;
-    if (builtTeams.length < 2 && !effectiveCaliId) {
-      alert("Need at least 2 teams.");
-      return;
-    }
-
-    // build cards with rules
-    const cardsRes = buildCards(builtTeams, effectiveCaliId);
-    if (!cardsRes.ok) {
-      alert(cardsRes.reason);
-      return;
-    }
-
-    await updateDoubles({
-      caliPlayerId: effectiveCaliId || "",
-      teams: builtTeams,
-      cards: cardsRes.cards,
-      scores: {},
-      submitted: {},
-      adjustments: {},
-      settings: { ...settings, locked: true },
-    });
-
-    setCardsOpen(true);
-    window.scrollTo(0, 0);
-  }
-
-  async function finalizeDoubles() {
-    if (!canFinalize) {
-      alert("Finalize is only available once every card submits.");
-      return;
-    }
-    await updateDoubles({
-      settings: { ...settings, finalized: true },
-    });
-    setEditOpen(false);
-    alert("Finalized. Doubles is now locked.");
-  }
-
-  async function resetDoubles() {
-    await requireAdmin(async () => {
-      const ok = window.confirm(
-        "Reset DOUBLES only?\n\nThis clears doubles players, Cali, teams, cards, scores, layout note, and leaderboard edits.\n(Tags + Putting will NOT be affected.)"
+    // If somehow we ended with only a single-team card, stop
+    const bad = newCards.some((c) => (c.teams || []).length < 2);
+    if (bad) {
+      window.alert(
+        "Could not build valid cards (a card ended with < 2 teams). Add more players and try again."
       );
-      if (!ok) return;
-
-      await updateDoc(leagueRef, {
-        doublesLeague: {
-          settings: { format: "random", locked: false, finalized: false, caliMode: "auto" },
-          layoutNote: "",
-          players: [],
-          caliPlayerId: "",
-          teams: [],
-          cards: [],
-          scores: {},
-          submitted: {},
-          adjustments: {},
-        },
-      });
-
-      setOpenCards({});
-      setName("");
-      setGroup("A");
-      setAdminOpen(true);
-      setCheckinOpen(true);
-      setCardsOpen(true);
-      setLeaderboardsOpen(false);
-      setEditOpen(false);
-    });
-  }
-
-  async function toggleLeaderboardEdit() {
-    if (finalized) {
-      alert("Finalized. Leaderboard edits are locked.");
-      return;
-    }
-    await requireAdmin(async () => setEditOpen((v) => !v));
-  }
-
-  async function setFinalLeaderboardScore(rowId, desiredFinal) {
-    if (finalized) return;
-
-    const desired = Number(desiredFinal);
-    if (Number.isNaN(desired)) return;
-
-    const base = baseScoreForRow(rowId);
-    const baseNum = base === null ? 0 : Number(base);
-
-    const adj = Math.trunc(desired - baseNum);
-    await updateDoublesDot(`adjustments.${rowId}`, adj);
-  }
-
-  async function clearAdjustment(rowId) {
-    if (finalized) return;
-    await requireAdmin(async () => {
-      const path = `doublesLeague.adjustments.${rowId}`;
-      await updateDoc(leagueRef, { [path]: deleteField() });
-    });
-  }
-
-  // ---------- Card scoring ----------
-  function toggleCard(cardId) {
-    setOpenCards((prev) => ({ ...prev, [cardId]: !prev[cardId] }));
-  }
-
-  function scoreValue(rowId) {
-    const raw = scores?.[rowId];
-    if (raw === undefined || raw === null || raw === "") return "";
-    const n = Number(raw);
-    return Number.isNaN(n) ? "" : String(n);
-  }
-
-  async function setRowScore(rowId, value) {
-    if (!locked) return;
-    if (finalized) return;
-
-    if (value === "" || value === null || value === undefined) {
-      await updateDoc(leagueRef, {
-        [`doublesLeague.scores.${rowId}`]: deleteField(),
-      });
       return;
     }
 
-    const v = clampScore(value);
-    await updateDoc(leagueRef, {
-      [`doublesLeague.scores.${rowId}`]: v,
-    });
-  }
+    // Persist
+    const teamList = [];
+    newCards.forEach((c) => (c.teams || []).forEach((t) => teamList.push(t)));
 
-  function isCardReadyToSubmit(card) {
-    const tids = card?.teamIds || [];
-    const hasCali = !!card?.caliPlayerId;
-
-    // must have at least one team
-    if (!tids.length) return false;
-
-    // Each team must have a score
-    for (const tid of tids) {
-      const raw = scores?.[tid];
-      if (raw === undefined || raw === null || raw === "") return false;
-      if (Number.isNaN(Number(raw))) return false;
-    }
-
-    // If has cali, cali must have score
-    if (hasCali) {
-      const ck = caliKeyForPlayer(card.caliPlayerId);
-      const raw = scores?.[ck];
-      if (raw === undefined || raw === null || raw === "") return false;
-      if (Number.isNaN(Number(raw))) return false;
-    }
-
-    return true;
-  }
-
-  async function submitCard(cardId) {
-    if (finalized) return;
-
-    const card = cards.find((c) => c.id === cardId);
-    if (!card) return;
-
-    if (!!submitted?.[cardId]) return;
-
-    if (!isCardReadyToSubmit(card)) {
-      alert("Enter scores for every team (and Cali if present) on this card first.");
-      return;
-    }
-
-    await updateDoublesDot(`submitted.${cardId}`, true);
-    alert("Card submitted ✅");
-  }
-
-  // ---------- Leaderboard ----------
-  const leaderboardRows = useMemo(() => {
-    const rows = [];
-
-    // doubles teams
-    teams.forEach((t) => {
-      const members = (t.playerIds || [])
-        .map((pid) => playerById[pid]?.name)
-        .filter(Boolean);
-
-      const base = baseScoreForRow(t.id);
-      const adj = Number(adjustments?.[t.id] ?? 0) || 0;
-      const final = base === null ? null : base + adj;
-
-      rows.push({
+    await updateDoubles({
+      "doubles.teams": teamList.map((t) => ({
         id: t.id,
-        label: t.name,
-        members,
-        base,
-        adj,
-        final,
-        isCali: false,
-      });
+        teamName: t.teamName,
+        players: t.players,
+        cali: !!t.cali,
+        poolMeta: t.poolMeta || "",
+      })),
+      "doubles.cards": newCards.map((c) => ({
+        id: c.id,
+        startHole: c.startHole,
+        teams: c.teams.map((t) => ({
+          id: t.id,
+          teamName: t.teamName,
+          players: t.players,
+          cali: !!t.cali,
+          poolMeta: t.poolMeta || "",
+        })),
+        createdAt: c.createdAt,
+        submittedAt: null,
+      })),
+      "doubles.submissions": {}, // reset submissions
     });
 
-    // cali row (once teams/cards are made)
-    if (locked && caliPlayerId) {
-      const p = playerById[caliPlayerId];
-      const rowId = caliKeyForPlayer(caliPlayerId);
+    setSubmitStatus({});
+    setScoreInputs({});
+    setShowCards(true);
+  }
 
-      const base = baseScoreForRow(rowId);
-      const adj = Number(adjustments?.[rowId] ?? 0) || 0;
-      const final = base === null ? null : base + adj;
+  // --- Card scoring ---
+  function getTeamParValue(cardId, teamId) {
+    return scoreInputs?.[cardId]?.[teamId] ?? 0;
+  }
 
-      rows.push({
-        id: rowId,
-        label: p ? `${p.name} (Cali)` : "Cali",
-        members: p ? [p.name] : [],
-        base,
-        adj,
-        final,
-        isCali: true,
+  function setTeamParValue(cardId, teamId, par) {
+    setScoreInputs((prev) => ({
+      ...prev,
+      [cardId]: {
+        ...(prev[cardId] || {}),
+        [teamId]: par,
+      },
+    }));
+  }
+
+  async function submitCardScores(card) {
+    const cardId = card.id;
+    try {
+      setSubmitStatus((s) => ({ ...s, [cardId]: "" }));
+
+      // Build submissions updates for each team in card
+      const updates = {};
+      (card.teams || []).forEach((t) => {
+        const par = Number(getTeamParValue(cardId, t.id));
+        updates[`doubles.submissions.${t.id}`] = {
+          teamId: t.id,
+          teamName: t.teamName,
+          par: clamp(par, -18, 18),
+          cardId,
+          submittedAt: Date.now(),
+        };
       });
+
+      // Mark card submitted (optional)
+      // We’ll set a timestamp at card level too, but keep it lightweight
+      const newCards = (cards || []).map((c) =>
+        c.id === cardId ? { ...c, submittedAt: Date.now() } : c
+      );
+
+      await updateDoubles({
+        ...updates,
+        "doubles.cards": newCards,
+      });
+
+      setSubmitStatus((s) => ({ ...s, [cardId]: "ok" }));
+      setTimeout(() => {
+        setSubmitStatus((s) => ({ ...s, [cardId]: "" }));
+      }, 3500);
+    } catch (e) {
+      console.error(e);
+      setSubmitStatus((s) => ({ ...s, [cardId]: "err" }));
+      window.alert("Error submitting card. Try again.");
+    }
+  }
+
+  // --- Admin actions ---
+  async function adminSaveLayout() {
+    if (!requireAdmin()) return;
+    await updateDoubles({ "doubles.layoutText": layoutDraft || "" });
+  }
+
+  async function adminResetDoublesOnly() {
+    if (!requireAdmin()) return;
+    const ok = window.confirm(
+      "Erase Doubles check-ins, teams, cards, submissions, and layout? (Doubles only)"
+    );
+    if (!ok) return;
+
+    await updateDoubles({
+      "doubles.layoutText": "",
+      "doubles.checkIns": [],
+      "doubles.teams": [],
+      "doubles.cards": [],
+      "doubles.submissions": {},
+      "doubles.settings.manualCaliPlayerId": "",
+    });
+
+    setCheckInName("");
+    setSubmitStatus({});
+    setScoreInputs({});
+    setLayoutDraft("");
+    setEditStartHolesMode(false);
+  }
+
+  async function adminSetFormat(format) {
+    if (!requireAdmin()) return;
+    await updateDoubles({
+      "doubles.settings.format": format,
+      // Reset manual cali selection because pools might differ
+      "doubles.settings.manualCaliPlayerId": "",
+    });
+  }
+
+  async function adminSetCaliMode(mode) {
+    if (!requireAdmin()) return;
+    await updateDoubles({
+      "doubles.settings.caliMode": mode,
+      ...(mode === "random"
+        ? { "doubles.settings.manualCaliPlayerId": "" }
+        : {}),
+    });
+  }
+
+  async function adminSetManualCali(playerId) {
+    if (!requireAdmin()) return;
+    await updateDoubles({
+      "doubles.settings.manualCaliPlayerId": playerId,
+    });
+  }
+
+  async function adminSaveStartHoles() {
+    if (!requireAdmin()) return;
+    const next = (cards || []).map((c) => ({
+      ...c,
+      startHole: clamp(Number(startHoleEdits[c.id] ?? c.startHole ?? 1), 1, 36),
+    }));
+    await updateDoubles({ "doubles.cards": next });
+    setEditStartHolesMode(false);
+  }
+
+  const showManualCaliPicker = useMemo(() => {
+    const mode = settings.caliMode || "random";
+    if (mode !== "manual") return false;
+
+    // Only show picker if odd number of checked-in players (per your requirement)
+    const format = settings.format || "random";
+    if (format === "seated") {
+      const A = (checkIns || []).filter((p) => p.pool === "A").length;
+      const B = (checkIns || []).filter((p) => p.pool === "B").length;
+      return A % 2 === 1 || B % 2 === 1;
+    }
+    return (checkIns || []).length % 2 === 1;
+  }, [settings.caliMode, settings.format, checkIns]);
+
+  const caliPickerOptions = useMemo(() => {
+    const format = settings.format || "random";
+    const manualId = settings.manualCaliPlayerId || "";
+
+    if (!showManualCaliPicker) return [];
+
+    if (format === "seated") {
+      const A = (checkIns || []).filter((p) => p.pool === "A").length;
+      const B = (checkIns || []).filter((p) => p.pool === "B").length;
+      const oddPool = A % 2 === 1 ? "A" : B % 2 === 1 ? "B" : null;
+      return (checkIns || [])
+        .filter((p) => p.pool === oddPool)
+        .map((p) => ({
+          id: p.id,
+          label: `${p.name} (${p.pool})`,
+          selected: p.id === manualId,
+        }));
     }
 
-    // Sort: by final score ascending (best under par first).
-    // If not submitted yet (null), push to bottom.
-    rows.sort((a, b) => {
-      if (a.final === null && b.final === null) return 0;
-      if (a.final === null) return 1;
-      if (b.final === null) return -1;
-      return a.final - b.final;
-    });
+    return (checkIns || []).map((p) => ({
+      id: p.id,
+      label: p.name,
+      selected: p.id === manualId,
+    }));
+  }, [
+    settings.format,
+    settings.manualCaliPlayerId,
+    showManualCaliPicker,
+    checkIns,
+  ]);
 
-    return rows;
-  }, [teams, playerById, scores, adjustments, locked, caliPlayerId]);
+  // --- Render helpers ---
+  const sectionCard = (children) => (
+    <div
+      style={{
+        background: COLORS.cardBg,
+        borderRadius: 18,
+        boxShadow: COLORS.shadow,
+        padding: 16,
+        marginTop: 14,
+        border: "1px solid rgba(0,0,0,0.06)",
+      }}
+    >
+      {children}
+    </div>
+  );
 
-  // ---------- UI helpers ----------
-  const submitStats = locked ? submittedCount() : { submitted: 0, total: 0 };
-  const missing = locked ? missingCards() : [];
+  const pill = (text, colorBg = "#eef2ff", colorText = COLORS.navy) => (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "6px 10px",
+        borderRadius: 999,
+        background: colorBg,
+        color: colorText,
+        fontWeight: 900,
+        fontSize: 12,
+        marginRight: 8,
+      }}
+    >
+      {text}
+    </span>
+  );
 
-  // ---------- Render ----------
+  // IMPORTANT: Leaderboard placement logic requested
+  // If has submissions => show (expanded) directly under Layout at top
+  // Else => show leaderboard above Admin tools (still above Admin, but later)
+  const renderLeaderboardSection = (forceExpanded = false) => {
+    const open = forceExpanded ? true : showLeaderboard;
+
+    return sectionCard(
+      <div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
+            Leaderboard
+          </div>
+          {!forceExpanded && (
+            <button
+              style={subtleButton}
+              onClick={() => setShowLeaderboard((v) => !v)}
+            >
+              {open ? "Hide" : "Show"}
+            </button>
+          )}
+        </div>
+
+        {!open ? null : (
+          <div style={{ marginTop: 12 }}>
+            {!hasSubmissions ? (
+              <div style={{ color: COLORS.gray, fontWeight: 700 }}>
+                No submissions yet.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 10 }}>
+                {leaderboard.map((row, idx) => (
+                  <div
+                    key={row.teamId}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 12px",
+                      borderRadius: 14,
+                      border: "1px solid rgba(0,0,0,0.08)",
+                      background: "#fff",
+                    }}
+                  >
+                    <div
+                      style={{ display: "flex", alignItems: "center", gap: 10 }}
+                    >
+                      <div
+                        style={{
+                          fontWeight: 1000,
+                          width: 28,
+                          color: COLORS.navy,
+                        }}
+                      >
+                        #{idx + 1}
+                      </div>
+                      <div style={{ fontWeight: 950 }}>{row.teamName}</div>
+                    </div>
+                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                      {toLabelPar(row.par ?? 0)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (!loaded) {
+    return (
+      <div style={{ minHeight: "100vh", padding: 24, background: "#fff" }}>
+        <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <Header />
+          {sectionCard(
+            <div style={{ fontWeight: 900, color: COLORS.gray }}>
+              Loading Doubles…
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -800,892 +864,876 @@ export default function DoublesPage() {
       }}
     >
       <div style={{ width: "100%", maxWidth: 760 }}>
-        <div
-          style={{
-            textAlign: "center",
-            background: COLORS.panel,
-            borderRadius: 18,
-            padding: 26,
-            border: `2px solid ${COLORS.navy}`,
-            boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
-          }}
-        >
-          <Header />
+        <Header />
 
-          <div style={{ color: COLORS.green, marginTop: 14, marginBottom: 12, fontWeight: 900 }}>
-            Doubles League{" "}
-            {locked ? (
-              <span style={{ color: COLORS.navy }}>— In progress</span>
-            ) : (
-              <span style={{ opacity: 0.75, fontWeight: 800 }}>— Not started</span>
-            )}
-            {finalized ? (
-              <div style={{ marginTop: 6, color: COLORS.red, fontWeight: 900 }}>
-                FINALIZED (locked)
-              </div>
-            ) : null}
-          </div>
-
-          {/* Admin status (who hasn't submitted) */}
-          {locked && (
-            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 14 }}>
+        {/* TOP: Layout + Status */}
+        {sectionCard(
+          <div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
               <div>
-                Admin Status: Cards submitted —{" "}
-                <strong>
-                  {submitStats.submitted} / {submitStats.total}
-                </strong>
+                <div
+                  style={{ fontWeight: 1000, fontSize: 20, color: COLORS.navy }}
+                >
+                  Doubles
+                </div>
+                <div
+                  style={{
+                    marginTop: 6,
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 8,
+                  }}
+                >
+                  {pill(
+                    `Format: ${
+                      (settings.format || "random") === "seated"
+                        ? "Seated Doubles"
+                        : "Random Doubles"
+                    }`
+                  )}
+                  {pill(`Checked In: ${(checkIns || []).length}`)}
+                  {pill(`Cards: ${(cards || []).length}`)}
+                  {pill(`Submissions: ${leaderboard.length}`)}
+                </div>
               </div>
 
-              {missing.length > 0 ? (
-                <div style={{ marginTop: 6 }}>
-                  Waiting on:{" "}
-                  <strong style={{ color: COLORS.red }}>
-                    {missing.map((c) => c.name).join(", ")}
-                  </strong>
+              <div
+                style={{
+                  textAlign: "right",
+                  color: COLORS.gray,
+                  fontWeight: 800,
+                  fontSize: 12,
+                }}
+              >
+                {APP_VERSION}
+              </div>
+            </div>
+
+            {/* Submission status */}
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontWeight: 1000,
+                  color: COLORS.navy,
+                  marginBottom: 8,
+                }}
+              >
+                Submission Status
+              </div>
+              {(teams || []).length === 0 ? (
+                <div style={{ color: COLORS.gray, fontWeight: 700 }}>
+                  Teams will appear here after “Make Teams”.
                 </div>
               ) : (
-                <div style={{ marginTop: 6, color: COLORS.green, fontWeight: 900 }}>
-                  All cards submitted ✅
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {unsubmittedTeams.length === 0 ? (
+                    pill("All teams submitted ✅", "#eaffea", COLORS.green)
+                  ) : (
+                    <>
+                      {pill(
+                        `${unsubmittedTeams.length} team(s) not submitted`,
+                        "#fff4e6",
+                        "#8a4b00"
+                      )}
+                      {unsubmittedTeams.slice(0, 8).map((t) => (
+                        <span
+                          key={t.id}
+                          style={{
+                            display: "inline-block",
+                            padding: "6px 10px",
+                            borderRadius: 999,
+                            background: "#f4f4f4",
+                            fontWeight: 900,
+                            fontSize: 12,
+                          }}
+                        >
+                          {t.teamName}
+                        </span>
+                      ))}
+                      {unsubmittedTeams.length > 8 ? (
+                        <span
+                          style={{
+                            color: COLORS.gray,
+                            fontWeight: 900,
+                            fontSize: 12,
+                          }}
+                        >
+                          +{unsubmittedTeams.length - 8} more
+                        </span>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               )}
             </div>
-          )}
 
-          {/* Layout note shown to players */}
-          {layoutNote ? (
-            <div
-              style={{
-                marginBottom: 12,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: COLORS.soft,
-                padding: 12,
-                textAlign: "left",
-              }}
-            >
-              <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
+            {/* Layout */}
+            <div style={{ marginTop: 14 }}>
+              <div
+                style={{
+                  fontWeight: 1000,
+                  color: COLORS.navy,
+                  marginBottom: 8,
+                }}
+              >
                 Layout
               </div>
-              <div style={{ fontSize: 14, whiteSpace: "pre-wrap" }}>{layoutNote}</div>
-            </div>
-          ) : null}
-
-          {/* ADMIN TOOLS */}
-          <div
-            style={{
-              border: `1px solid ${COLORS.border}`,
-              borderRadius: 14,
-              background: COLORS.soft,
-              padding: 12,
-              textAlign: "left",
-              marginBottom: 12,
-            }}
-          >
-            <div
-              onClick={() => setAdminOpen((v) => !v)}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                cursor: "pointer",
-                gap: 10,
-              }}
-            >
-              <div style={{ fontWeight: 900, color: COLORS.navy }}>Admin Tools</div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                {adminOpen ? "Tap to collapse" : "Tap to expand"}
+              <div
+                style={{
+                  padding: 12,
+                  borderRadius: 14,
+                  border: "1px solid rgba(0,0,0,0.08)",
+                  background: "#fff",
+                  whiteSpace: "pre-wrap",
+                  minHeight: 44,
+                  fontWeight: 700,
+                  color: layoutDraft?.trim() ? "#111" : COLORS.gray,
+                }}
+              >
+                {layoutDraft?.trim()
+                  ? layoutDraft
+                  : "No layout notes yet. Admin can add notes below."}
               </div>
             </div>
+          </div>
+        )}
 
-            {adminOpen && (
-              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                {/* Format selector */}
+        {/* If submissions exist: leaderboard expands directly under Layout (top) */}
+        {hasSubmissions ? renderLeaderboardSection(true) : null}
+
+        {/* Cards section */}
+        {sectionCard(
+          <div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <div
+                style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}
+              >
+                Cards
+              </div>
+              <button
+                style={subtleButton}
+                onClick={() => setShowCards((v) => !v)}
+              >
+                {showCards ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            {!showCards ? null : (
+              <div style={{ marginTop: 12 }}>
+                {(cards || []).length === 0 ? (
+                  <div style={{ color: COLORS.gray, fontWeight: 700 }}>
+                    No cards yet. Players check in, then Admin makes teams.
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {(cards || []).map((card) => (
+                      <CardBlock
+                        key={card.id}
+                        card={card}
+                        navy={COLORS.navy}
+                        gray={COLORS.gray}
+                        green={COLORS.green}
+                        red={COLORS.red}
+                        buttonStyle={buttonStyle}
+                        subtleButton={subtleButton}
+                        getTeamParValue={getTeamParValue}
+                        setTeamParValue={setTeamParValue}
+                        submitCardScores={submitCardScores}
+                        submitStatus={submitStatus}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* If NO submissions yet: leaderboard should still be above Admin tools */}
+        {!hasSubmissions ? renderLeaderboardSection(false) : null}
+
+        {/* Admin section on BOTTOM (requested) */}
+        {sectionCard(
+          <div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <div
+                style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}
+              >
+                Admin Tools
+              </div>
+              <button
+                style={subtleButton}
+                onClick={() => setShowAdmin((v) => !v)}
+              >
+                {showAdmin ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            {!showAdmin ? null : (
+              <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
+                {/* Admin Auth */}
                 <div
                   style={{
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 12,
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.08)",
                     background: "#fff",
-                    padding: 10,
                   }}
                 >
-                  <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                      Admin Access
+                    </div>
+                    <div
+                      style={{
+                        fontWeight: 900,
+                        color: adminAuthed ? COLORS.green : COLORS.red,
+                      }}
+                    >
+                      {adminAuthed ? "Unlocked" : "Locked"}
+                    </div>
+                  </div>
+
+                  {!adminAuthed ? (
+                    <div
+                      style={{
+                        marginTop: 10,
+                        display: "flex",
+                        gap: 10,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <input
+                        value={adminPwInput}
+                        onChange={(e) => setAdminPwInput(e.target.value)}
+                        placeholder="Password"
+                        type="password"
+                        style={{
+                          padding: "12px 12px",
+                          borderRadius: 14,
+                          border: "1px solid rgba(0,0,0,0.2)",
+                          fontWeight: 800,
+                          flex: "1 1 200px",
+                        }}
+                      />
+                      <button
+                        style={buttonStyle}
+                        onClick={() => {
+                          if (adminPwInput === ADMIN_PASSWORD) {
+                            setAdminAuthed(true);
+                            setAdminPwInput("");
+                          } else {
+                            window.alert("Incorrect password.");
+                          }
+                        }}
+                      >
+                        Unlock
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        marginTop: 10,
+                        display: "flex",
+                        gap: 10,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <button
+                        style={subtleButton}
+                        onClick={() => setAdminAuthed(false)}
+                      >
+                        Lock Admin
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Format selection */}
+                <div
+                  style={{
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.08)",
+                    background: "#fff",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 900,
+                      color: COLORS.navy,
+                      marginBottom: 10,
+                    }}
+                  >
                     Doubles Format
                   </div>
 
-                  <div style={{ display: "grid", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
-                      onClick={() => setFormat("seated")}
-                      disabled={locked || finalized}
-                      style={{
-                        ...smallButtonStyle,
-                        width: "100%",
-                        background: format === "seated" ? COLORS.navy : "#fff",
-                        color: format === "seated" ? "white" : COLORS.navy,
-                        border: `1px solid ${COLORS.navy}`,
-                      }}
-                      title="Pairs A + B together (when possible)"
+                      style={
+                        (settings.format || "random") === "seated"
+                          ? buttonStyle
+                          : subtleButton
+                      }
+                      onClick={() => adminSetFormat("seated")}
                     >
                       Seated Doubles
                     </button>
-
                     <button
-                      onClick={() => setFormat("random")}
-                      disabled={locked || finalized}
-                      style={{
-                        ...smallButtonStyle,
-                        width: "100%",
-                        background: format === "random" ? COLORS.navy : "#fff",
-                        color: format === "random" ? "white" : COLORS.navy,
-                        border: `1px solid ${COLORS.navy}`,
-                      }}
-                      title="Random pairs"
+                      style={
+                        (settings.format || "random") === "random"
+                          ? buttonStyle
+                          : subtleButton
+                      }
+                      onClick={() => adminSetFormat("random")}
                     >
                       Random Doubles
                     </button>
+                  </div>
 
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Format is locked once teams/cards are created.
-                    </div>
+                  <div
+                    style={{
+                      marginTop: 10,
+                      color: COLORS.gray,
+                      fontWeight: 700,
+                    }}
+                  >
+                    Seated Doubles: pairs A + B. Random Doubles: random
+                    pairings.
                   </div>
                 </div>
 
                 {/* Cali mode */}
                 <div
                   style={{
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 12,
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.08)",
                     background: "#fff",
-                    padding: 10,
                   }}
                 >
-                  <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
+                  <div
+                    style={{
+                      fontWeight: 900,
+                      color: COLORS.navy,
+                      marginBottom: 10,
+                    }}
+                  >
                     Cali Mode
                   </div>
 
-                  <div style={{ display: "grid", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
-                      onClick={() => setCaliMode("auto")}
-                      disabled={locked || finalized}
-                      style={{
-                        ...smallButtonStyle,
-                        width: "100%",
-                        background: caliMode === "auto" ? COLORS.navy : "#fff",
-                        color: caliMode === "auto" ? "white" : COLORS.navy,
-                        border: `1px solid ${COLORS.navy}`,
-                      }}
-                      title="If odd players, auto-picks Cali (Seated: from odd pool)"
+                      style={
+                        (settings.caliMode || "random") === "random"
+                          ? buttonStyle
+                          : subtleButton
+                      }
+                      onClick={() => adminSetCaliMode("random")}
                     >
-                      Auto Cali (Random)
+                      Random Cali
                     </button>
-
                     <button
-                      onClick={() => setCaliMode("manual")}
-                      disabled={locked || finalized}
-                      style={{
-                        ...smallButtonStyle,
-                        width: "100%",
-                        background: caliMode === "manual" ? COLORS.navy : "#fff",
-                        color: caliMode === "manual" ? "white" : COLORS.navy,
-                        border: `1px solid ${COLORS.navy}`,
-                      }}
-                      title="Admin selects Cali if players are odd"
+                      style={
+                        (settings.caliMode || "random") === "manual"
+                          ? buttonStyle
+                          : subtleButton
+                      }
+                      onClick={() => adminSetCaliMode("manual")}
                     >
-                      Admin Selects Cali
+                      Admin Select Cali
                     </button>
-
-                    {caliMode === "manual" && !locked ? (
-                      isOddPlayers ? (
-                        <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                          <div style={{ fontSize: 12, opacity: 0.8 }}>
-                            Odd number of players detected — select who is Cali:
-                          </div>
-
-                          <select
-                            value={caliPlayerId}
-                            onChange={(e) => setCaliPlayerManual(e.target.value)}
-                            style={{ ...inputStyle, width: "100%", background: "#fff" }}
-                            disabled={finalized}
-                          >
-                            <option value="">Select Cali…</option>
-                            {players.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.name}
-                                {format === "seated" ? ` (${(p.group || "A") === "B" ? "B" : "A"})` : ""}
-                              </option>
-                            ))}
-                          </select>
-
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            {format === "seated"
-                              ? "Note: In Seated Doubles, Cali should be from the pool (A/B) that has the odd extra player."
-                              : "Note: Cali will be the single player (not part of a doubles team)."}
-                          </div>
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                          Manual Cali selection will appear when player count becomes odd.
-                        </div>
-                      )
-                    ) : null}
                   </div>
+
+                  {showManualCaliPicker ? (
+                    <div style={{ marginTop: 12 }}>
+                      <div
+                        style={{
+                          fontWeight: 900,
+                          marginBottom: 8,
+                          color: COLORS.navy,
+                        }}
+                      >
+                        Select Cali Player (odd player only)
+                      </div>
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {caliPickerOptions.map((opt) => (
+                          <button
+                            key={opt.id}
+                            style={opt.selected ? buttonStyle : subtleButton}
+                            onClick={() => adminSetManualCali(opt.id)}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        marginTop: 10,
+                        color: COLORS.gray,
+                        fontWeight: 700,
+                      }}
+                    >
+                      Manual Cali selector appears only when checked-in player
+                      count is odd (or odd pool in seated).
+                    </div>
+                  )}
                 </div>
 
-                {/* Layout box */}
+                {/* Player check-in */}
                 <div
                   style={{
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 12,
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.08)",
                     background: "#fff",
-                    padding: 10,
                   }}
                 >
-                  <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy, marginBottom: 6 }}>
-                    Layout (shown to players)
-                  </div>
-                  <textarea
-                    value={layoutNote}
-                    onChange={(e) => saveLayoutNote(e.target.value)}
-                    placeholder="Example: 'Shotgun start. Card 1 hole 1, Card 2 hole 3… OB is creek. Drop zone on 7.'"
-                    style={{
-                      ...inputStyle,
-                      width: "100%",
-                      minHeight: 90,
-                      resize: "vertical",
-                      background: "#fff",
-                      fontFamily: "inherit",
-                    }}
-                    disabled={finalized}
-                  />
-                </div>
-
-                {/* Make teams/cards */}
-                {!locked ? (
-                  <button
-                    onClick={makeTeamsAndCards}
-                    disabled={finalized || players.length < 4}
-                    style={{
-                      ...buttonStyle,
-                      width: "100%",
-                      background: COLORS.green,
-                      color: "white",
-                      border: `1px solid ${COLORS.green}`,
-                    }}
-                    title="Creates teams and assigns starting holes (1,3,5...)."
-                  >
-                    Make Teams + Assign Cards
-                  </button>
-                ) : (
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>Teams/cards locked.</div>
-                )}
-
-                {/* Leaderboard edit */}
-                <button
-                  onClick={toggleLeaderboardEdit}
-                  style={{
-                    ...smallButtonStyle,
-                    width: "100%",
-                    background: "#fff",
-                    border: `1px solid ${COLORS.navy}`,
-                    color: COLORS.navy,
-                  }}
-                  disabled={finalized || !locked}
-                  title="Requires admin password. Set final leaderboard scores before finalize."
-                >
-                  {editOpen ? "Close Leaderboard Edit" : "Edit Leaderboard Scores"}
-                </button>
-
-                {editOpen && !finalized && locked && (
                   <div
                     style={{
-                      border: `1px solid ${COLORS.border}`,
-                      borderRadius: 12,
-                      background: "#fff",
-                      padding: 10,
+                      fontWeight: 900,
+                      color: COLORS.navy,
+                      marginBottom: 10,
                     }}
                   >
-                    <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
-                      Set a row’s <strong>final score</strong>. This creates an adjustment
-                      (positive or negative). Disabled after Finalize.
-                    </div>
-
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {leaderboardRows.map((r) => {
-                        const base = r.base === null ? 0 : r.base;
-                        const total = r.final === null ? base + (r.adj || 0) : r.final;
-
-                        return (
-                          <div
-                            key={r.id}
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "1fr auto",
-                              gap: 10,
-                              alignItems: "center",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: `1px solid ${COLORS.border}`,
-                              background: COLORS.soft,
-                            }}
-                          >
-                            <div style={{ minWidth: 0 }}>
-                              <div style={{ fontWeight: 900, color: COLORS.text }}>
-                                {r.label}
-                              </div>
-                              <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>
-                                Base: <strong>{r.base === null ? "—" : r.base}</strong> • Adj:{" "}
-                                <strong style={{ color: r.adj ? COLORS.red : COLORS.navy }}>
-                                  {r.adj || 0}
-                                </strong>{" "}
-                                • Final: <strong>{r.final === null ? "—" : r.final}</strong>
-                              </div>
-                            </div>
-
-                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                              <input
-                                type="number"
-                                value={String(total)}
-                                onChange={(e) => setFinalLeaderboardScore(r.id, e.target.value)}
-                                style={{
-                                  ...inputStyle,
-                                  width: 96,
-                                  textAlign: "center",
-                                  background: "#fff",
-                                  fontWeight: 900,
-                                }}
-                              />
-                              <button
-                                onClick={() => clearAdjustment(r.id)}
-                                style={{
-                                  ...smallButtonStyle,
-                                  background: "#fff",
-                                  border: `1px solid ${COLORS.border}`,
-                                  fontWeight: 900,
-                                }}
-                                title="Requires admin password"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    Player Check-In
                   </div>
-                )}
 
-                {/* Finalize */}
-                {canFinalize && (
-                  <button
-                    onClick={finalizeDoubles}
-                    style={{
-                      ...buttonStyle,
-                      width: "100%",
-                      background: COLORS.red,
-                      color: "white",
-                      border: `1px solid ${COLORS.red}`,
-                    }}
-                    title="Locks Doubles once all cards submit."
-                  >
-                    Finalize Doubles (Lock)
-                  </button>
-                )}
-
-                {/* Reset doubles */}
-                <button
-                  onClick={resetDoubles}
-                  style={{
-                    ...smallButtonStyle,
-                    width: "100%",
-                    background: "#fff",
-                    border: `1px solid ${COLORS.border}`,
-                  }}
-                  title="Requires admin password."
-                >
-                  Reset Doubles
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* CHECK-IN */}
-          {!locked && (
-            <div
-              style={{
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: COLORS.soft,
-                padding: 12,
-                textAlign: "left",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                onClick={() => setCheckinOpen((v) => !v)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  cursor: "pointer",
-                  gap: 10,
-                }}
-              >
-                <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                  Player Check-In ({players.length})
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {checkinOpen ? "Tap to collapse" : "Tap to expand"}
-                </div>
-              </div>
-
-              {checkinOpen && (
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <input
+                      value={checkInName}
+                      onChange={(e) => setCheckInName(e.target.value)}
                       placeholder="Player name"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      style={{ ...inputStyle, width: 240 }}
-                      disabled={finalized}
+                      style={{
+                        padding: "12px 12px",
+                        borderRadius: 14,
+                        border: "1px solid rgba(0,0,0,0.2)",
+                        fontWeight: 800,
+                        flex: "1 1 220px",
+                      }}
                     />
 
-                    {format === "seated" ? (
+                    {(settings.format || "random") === "seated" ? (
                       <select
-                        value={group}
-                        onChange={(e) => setGroup(e.target.value)}
-                        style={{ ...inputStyle, width: 140, background: "#fff" }}
-                        disabled={finalized}
+                        value={checkInPool}
+                        onChange={(e) => setCheckInPool(e.target.value)}
+                        style={{
+                          padding: "12px 12px",
+                          borderRadius: 14,
+                          border: "1px solid rgba(0,0,0,0.2)",
+                          fontWeight: 900,
+                        }}
                       >
-                        <option value="A">A Player</option>
-                        <option value="B">B Player</option>
+                        <option value="A">Pool A</option>
+                        <option value="B">Pool B</option>
                       </select>
                     ) : null}
 
-                    <button
-                      onClick={addPlayer}
-                      style={{
-                        ...smallButtonStyle,
-                        background: COLORS.green,
-                        color: "white",
-                        border: `1px solid ${COLORS.green}`,
-                      }}
-                      disabled={finalized}
-                    >
-                      Add
+                    <button style={buttonStyle} onClick={handleCheckIn}>
+                      Check In
                     </button>
                   </div>
 
-                  {players.length ? (
-                    <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                      {players.map((p) => (
-                        <div
+                  <div
+                    style={{
+                      marginTop: 12,
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 8,
+                    }}
+                  >
+                    {(checkIns || []).length === 0 ? (
+                      <span style={{ color: COLORS.gray, fontWeight: 700 }}>
+                        No one checked in yet.
+                      </span>
+                    ) : (
+                      (checkIns || []).map((p) => (
+                        <span
                           key={p.id}
                           style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "#fff",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
+                            padding: "6px 10px",
+                            borderRadius: 999,
+                            background: "#f4f4f4",
+                            fontWeight: 900,
+                            fontSize: 12,
                           }}
                         >
-                          <div style={{ fontWeight: 900, color: COLORS.text }}>
-                            {p.name}
-                            {caliPlayerId === p.id ? (
-                              <span style={{ marginLeft: 8, fontSize: 12, color: COLORS.red, fontWeight: 900 }}>
-                                (Cali)
-                              </span>
-                            ) : null}
-                          </div>
-                          {format === "seated" ? (
-                            <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
-                              {(p.group || "A") === "B" ? "B" : "A"}
-                            </div>
-                          ) : (
-                            <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.navy }}>
-                              Player
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                      Add players as they arrive.
-                    </div>
-                  )}
-
-                  {players.length > 0 ? (
-                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                      {players.length % 2 === 1 ? (
-                        <span>
-                          Odd number of players detected — <strong>Cali will be used</strong>.
-                          {caliMode === "manual" ? " (Admin must select.)" : " (Auto.)"}
+                          {p.name}
+                          {(settings.format || "random") === "seated"
+                            ? ` (${p.pool})`
+                            : ""}
                         </span>
-                      ) : (
-                        <span>Even number of players — no Cali needed.</span>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* CARDS */}
-          <div
-            style={{
-              border: `1px solid ${COLORS.border}`,
-              borderRadius: 14,
-              background: COLORS.soft,
-              padding: 12,
-              textAlign: "left",
-              marginBottom: 12,
-            }}
-          >
-            <div
-              onClick={() => setCardsOpen((v) => !v)}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                cursor: "pointer",
-                gap: 10,
-              }}
-            >
-              <div style={{ fontWeight: 900, color: COLORS.navy }}>Cards</div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                {cardsOpen ? "Tap to collapse" : "Tap to expand"}
-              </div>
-            </div>
-
-            {cardsOpen && (
-              <div style={{ marginTop: 10 }}>
-                {!locked ? (
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>
-                    Check in players, choose format + Cali mode, then use{" "}
-                    <strong>Make Teams + Assign Cards</strong>.
+                      ))
+                    )}
                   </div>
-                ) : (
-                  <div style={{ display: "grid", gap: 10 }}>
-                    {cards.map((c) => {
-                      const isOpen = !!openCards[c.id];
-                      const alreadySubmitted = !!submitted?.[c.id];
-                      const caliOnCard = c.caliPlayerId ? playerById[c.caliPlayerId] : null;
-                      const teamObjs = (c.teamIds || []).map((tid) => teamById[tid]).filter(Boolean);
+                </div>
 
-                      return (
-                        <div
-                          key={c.id}
-                          style={{
-                            border: `1px solid ${COLORS.border}`,
-                            borderRadius: 14,
-                            background: "#fff",
-                            overflow: "hidden",
-                          }}
-                        >
+                {/* Layout editor */}
+                <div
+                  style={{
+                    padding: 12,
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.08)",
+                    background: "#fff",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 900,
+                      color: COLORS.navy,
+                      marginBottom: 10,
+                    }}
+                  >
+                    Edit Layout Notes
+                  </div>
+
+                  <textarea
+                    value={layoutDraft}
+                    onChange={(e) => setLayoutDraft(e.target.value)}
+                    rows={4}
+                    placeholder="Add layout / rules / notes players need…"
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      borderRadius: 14,
+                      border: "1px solid rgba(0,0,0,0.2)",
+                      fontWeight: 700,
+                      resize: "vertical",
+                    }}
+                  />
+
+                  <div
+                    style={{
+                      marginTop: 10,
+                      display: "flex",
+                      gap: 10,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <button style={buttonStyle} onClick={adminSaveLayout}>
+                      Save Layout
+                    </button>
+                  </div>
+                </div>
+
+                {/* Make Teams + Cards */}
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button style={buttonStyle} onClick={adminMakeTeamsAndCards}>
+                    Make Teams & Cards
+                  </button>
+
+                  <button
+                    style={subtleButton}
+                    onClick={() => {
+                      if (!requireAdmin()) return;
+                      setEditStartHolesMode((v) => !v);
+                    }}
+                  >
+                    {editStartHolesMode
+                      ? "Cancel Start Hole Edit"
+                      : "Edit Starting Holes"}
+                  </button>
+
+                  <button style={dangerButton} onClick={adminResetDoublesOnly}>
+                    Erase Doubles (Start Fresh)
+                  </button>
+                </div>
+
+                {/* Edit Starting Holes UI (requested) */}
+                {editStartHolesMode ? (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderRadius: 14,
+                      border: "1px solid rgba(0,0,0,0.08)",
+                      background: "#fff",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontWeight: 900,
+                        color: COLORS.navy,
+                        marginBottom: 10,
+                      }}
+                    >
+                      Edit Starting Holes
+                    </div>
+
+                    {(cards || []).length === 0 ? (
+                      <div style={{ color: COLORS.gray, fontWeight: 700 }}>
+                        No cards yet.
+                      </div>
+                    ) : (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {(cards || []).map((c, idx) => (
                           <div
-                            onClick={() => toggleCard(c.id)}
+                            key={c.id}
                             style={{
-                              padding: "12px 12px",
-                              cursor: "pointer",
                               display: "flex",
-                              justifyContent: "space-between",
                               alignItems: "center",
+                              justifyContent: "space-between",
                               gap: 10,
-                              background: COLORS.soft,
+                              padding: "10px 12px",
+                              borderRadius: 14,
+                              border: "1px solid rgba(0,0,0,0.08)",
                             }}
                           >
-                            <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                              {c.name}{" "}
-                              <span style={{ fontSize: 12, opacity: 0.75 }}>
-                                (Start hole {c.startHole})
-                              </span>
-                              <span style={{ marginLeft: 10, fontSize: 12, opacity: 0.75 }}>
-                                {alreadySubmitted ? "✓ submitted" : "not submitted"}
-                              </span>
+                            <div
+                              style={{ fontWeight: 950, color: COLORS.navy }}
+                            >
+                              Card {idx + 1}
                             </div>
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>
-                              {isOpen ? "Tap to collapse" : "Tap to expand"}
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
+                              }}
+                            >
+                              <span
+                                style={{ fontWeight: 900, color: COLORS.gray }}
+                              >
+                                Start Hole
+                              </span>
+                              <input
+                                type="number"
+                                value={startHoleEdits[c.id] ?? c.startHole ?? 1}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setStartHoleEdits((p) => ({
+                                    ...p,
+                                    [c.id]: val === "" ? "" : Number(val),
+                                  }));
+                                }}
+                                style={{
+                                  width: 90,
+                                  padding: "10px 10px",
+                                  borderRadius: 14,
+                                  border: "1px solid rgba(0,0,0,0.2)",
+                                  fontWeight: 900,
+                                }}
+                              />
                             </div>
                           </div>
+                        ))}
+                      </div>
+                    )}
 
-                          {isOpen && (
-                            <div style={{ padding: 12 }}>
-                              {/* Teams display */}
-                              <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
-                                Starting hole: <strong>{c.startHole}</strong>
-                              </div>
-
-                              <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
-                                {teamObjs.map((t) => {
-                                  const names = (t.playerIds || [])
-                                    .map((pid) => playerById[pid]?.name)
-                                    .filter(Boolean);
-                                  return (
-                                    <div
-                                      key={t.id}
-                                      style={{
-                                        padding: "10px 12px",
-                                        borderRadius: 12,
-                                        border: `1px solid ${COLORS.border}`,
-                                        background: COLORS.soft,
-                                      }}
-                                    >
-                                      <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                        {t.name}
-                                      </div>
-                                      <div style={{ marginTop: 6, fontSize: 14, fontWeight: 800 }}>
-                                        {names.join(" + ")}
-                                      </div>
-
-                                      <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
-                                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                          Score (relative par)
-                                        </div>
-                                        <select
-                                          value={scoreValue(t.id)}
-                                          disabled={alreadySubmitted || finalized}
-                                          onChange={(e) => setRowScore(t.id, e.target.value)}
-                                          style={{
-                                            ...inputStyle,
-                                            width: 120,
-                                            background: "#fff",
-                                            fontWeight: 900,
-                                            textAlign: "center",
-                                          }}
-                                        >
-                                          <option value="">—</option>
-                                          {Array.from({ length: 37 }, (_, i) => i - 18).map((n) => (
-                                            <option key={n} value={n}>
-                                              {n > 0 ? `+${n}` : `${n}`}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-
-                                {/* Cali display if present */}
-                                {caliOnCard ? (
-                                  <div
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: 12,
-                                      border: `1px solid ${COLORS.border}`,
-                                      background: "#fff7f7",
-                                    }}
-                                  >
-                                    <div style={{ fontWeight: 900, color: COLORS.red }}>
-                                      Cali
-                                    </div>
-                                    <div style={{ marginTop: 6, fontSize: 14, fontWeight: 900 }}>
-                                      {caliOnCard.name}
-                                    </div>
-
-                                    <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
-                                      <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                        Score (relative par)
-                                      </div>
-                                      <select
-                                        value={scoreValue(caliKeyForPlayer(caliOnCard.id))}
-                                        disabled={alreadySubmitted || finalized}
-                                        onChange={(e) =>
-                                          setRowScore(caliKeyForPlayer(caliOnCard.id), e.target.value)
-                                        }
-                                        style={{
-                                          ...inputStyle,
-                                          width: 120,
-                                          background: "#fff",
-                                          fontWeight: 900,
-                                          textAlign: "center",
-                                        }}
-                                      >
-                                        <option value="">—</option>
-                                        {Array.from({ length: 37 }, (_, i) => i - 18).map((n) => (
-                                          <option key={n} value={n}>
-                                            {n > 0 ? `+${n}` : `${n}`}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-
-                              <button
-                                onClick={() => submitCard(c.id)}
-                                disabled={alreadySubmitted || finalized}
-                                style={{
-                                  ...buttonStyle,
-                                  width: "100%",
-                                  background: alreadySubmitted ? "#ddd" : COLORS.green,
-                                  color: alreadySubmitted ? "#444" : "white",
-                                  border: `1px solid ${alreadySubmitted ? "#ddd" : COLORS.green}`,
-                                }}
-                                title="Requires scores for every team (and Cali if present)."
-                              >
-                                {alreadySubmitted ? "Card Submitted (Locked)" : "Submit Card Scores"}
-                              </button>
-
-                              <div
-                                style={{
-                                  marginTop: 8,
-                                  fontSize: 12,
-                                  opacity: 0.75,
-                                  textAlign: "center",
-                                }}
-                              >
-                                Submitting locks this card. Leaderboard updates live.
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                    <div
+                      style={{
+                        marginTop: 12,
+                        display: "flex",
+                        gap: 10,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <button style={buttonStyle} onClick={adminSaveStartHoles}>
+                        Save Starting Holes
+                      </button>
+                      <button
+                        style={subtleButton}
+                        onClick={() => setEditStartHolesMode(false)}
+                      >
+                        Done
+                      </button>
+                    </div>
                   </div>
-                )}
+                ) : null}
               </div>
             )}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-          {/* LEADERBOARD */}
-          <div style={{ textAlign: "left" }}>
-            <div
-              onClick={() => setLeaderboardsOpen((v) => !v)}
-              style={{
-                fontWeight: 900,
-                color: COLORS.navy,
-                marginBottom: 8,
-                cursor: "pointer",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 10,
-                padding: "10px 12px",
-                borderRadius: 14,
-                border: `1px solid ${COLORS.border}`,
-                background: "#fff",
-              }}
-            >
-              <span>Leaderboard (Live)</span>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>
-                {leaderboardsOpen ? "Tap to hide" : "Tap to show"}
-              </span>
-            </div>
+/** Collapsible card block (like putting stations) */
+function CardBlock({
+  card,
+  navy,
+  gray,
+  green,
+  red,
+  buttonStyle,
+  subtleButton,
+  getTeamParValue,
+  setTeamParValue,
+  submitCardScores,
+  submitStatus,
+}) {
+  const [open, setOpen] = useState(false);
 
-            {leaderboardsOpen && (
+  const status = submitStatus?.[card.id] || "";
+  const submitted = !!card.submittedAt;
+
+  return (
+    <div
+      style={{
+        borderRadius: 18,
+        border: "1px solid rgba(0,0,0,0.08)",
+        background: "#fff",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          cursor: "pointer",
+          background: "rgba(0,0,0,0.02)",
+        }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ fontWeight: 1000, color: navy }}>Card</div>
+          <div style={{ fontWeight: 900, color: gray }}>
+            Start Hole: {card.startHole ?? 1}
+          </div>
+          {submitted ? (
+            <span style={{ fontWeight: 1000, color: green }}>Submitted ✅</span>
+          ) : (
+            <span style={{ fontWeight: 1000, color: gray }}>Not submitted</span>
+          )}
+        </div>
+
+        <button
+          style={subtleButton}
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }}
+        >
+          {open ? "Collapse" : "Expand"}
+        </button>
+      </div>
+
+      {!open ? null : (
+        <div style={{ padding: 12 }}>
+          <div style={{ fontWeight: 1000, color: navy, marginBottom: 8 }}>
+            Teams
+          </div>
+
+          <div style={{ display: "grid", gap: 10 }}>
+            {(card.teams || []).map((t) => (
               <div
+                key={t.id}
                 style={{
-                  border: `1px solid ${COLORS.border}`,
+                  padding: "10px 12px",
                   borderRadius: 14,
-                  background: "#fff",
-                  overflow: "hidden",
+                  border: "1px solid rgba(0,0,0,0.08)",
                 }}
               >
                 <div
                   style={{
-                    padding: "12px 12px",
-                    background: COLORS.soft,
                     display: "flex",
                     justifyContent: "space-between",
+                    gap: 12,
                     alignItems: "center",
                   }}
                 >
-                  <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                    Rows: <span style={{ opacity: 0.75 }}>{leaderboardRows.length}</span>
+                  <div>
+                    <div style={{ fontWeight: 1000, color: navy }}>
+                      {t.teamName}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        color: gray,
+                        fontWeight: 800,
+                        fontSize: 13,
+                      }}
+                    >
+                      {Array.isArray(t.players) ? t.players.join(" + ") : ""}
+                    </div>
                   </div>
-                  {finalized ? (
-                    <div style={{ fontSize: 12, fontWeight: 900, color: COLORS.red }}>
-                      FINALIZED
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>Updates as cards submit</div>
-                  )}
-                </div>
 
-                <div style={{ padding: 12 }}>
-                  {leaderboardRows.length === 0 ? (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      No teams yet. Make teams to start.
-                    </div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {leaderboardRows.map((r, idx) => (
-                        <div
-                          key={r.id}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: r.isCali ? "#fff7f7" : COLORS.soft,
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                          }}
-                        >
-                          <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
-                            <div
-                              style={{
-                                width: 34,
-                                height: 34,
-                                borderRadius: 12,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontWeight: 900,
-                                color: "white",
-                                background: idx === 0 ? COLORS.green : COLORS.navy,
-                                flexShrink: 0,
-                              }}
-                            >
-                              {idx + 1}
-                            </div>
-
-                            <div style={{ minWidth: 0 }}>
-                              <div style={{ fontWeight: 900, color: COLORS.text }}>
-                                {r.label}
-                                {r.adj ? (
-                                  <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.75 }}>
-                                    (adj {r.adj > 0 ? "+" : ""}
-                                    {r.adj})
-                                  </span>
-                                ) : null}
-                              </div>
-                              {r.members?.length ? (
-                                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>
-                                  {r.members.join(" + ")}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div style={{ fontWeight: 900, color: COLORS.navy, whiteSpace: "nowrap" }}>
-                            {r.final === null ? "—" : r.final > 0 ? `+${r.final}` : `${r.final}`}
-                          </div>
-                        </div>
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 10 }}
+                  >
+                    <span style={{ fontWeight: 900, color: gray }}>Score</span>
+                    <select
+                      value={getTeamParValue(card.id, t.id)}
+                      onChange={(e) =>
+                        setTeamParValue(card.id, t.id, Number(e.target.value))
+                      }
+                      style={{
+                        padding: "10px 10px",
+                        borderRadius: 14,
+                        border: "1px solid rgba(0,0,0,0.2)",
+                        fontWeight: 900,
+                      }}
+                    >
+                      {range(-18, 18).map((n) => (
+                        <option key={n} value={n}>
+                          {n === 0 ? "E" : n > 0 ? `+${n}` : `${n}`}
+                        </option>
                       ))}
-                    </div>
-                  )}
+                    </select>
+                  </div>
                 </div>
               </div>
-            )}
+            ))}
           </div>
 
-          <div style={{ marginTop: 18, fontSize: 12, opacity: 0.65, textAlign: "center" }}>
-            Tip: Starting holes space out by 2 (1, 3, 5...). Cards expand for scoring. Leaderboard
-            updates live as cards submit.
-          </div>
+          <div
+            style={{
+              marginTop: 12,
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <button style={buttonStyle} onClick={() => submitCardScores(card)}>
+              Submit Card
+            </button>
 
-          {/* Footer */}
-          <div style={{ marginTop: 14, fontSize: 12, opacity: 0.55, textAlign: "center" }}>
-            {APP_VERSION} • Developed by Eli Morgan
+            {status === "ok" ? (
+              <span style={{ fontWeight: 1000, color: green }}>
+                Submission successful ✅
+              </span>
+            ) : status === "err" ? (
+              <span style={{ fontWeight: 1000, color: red }}>
+                Submission failed ❌
+              </span>
+            ) : null}
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
