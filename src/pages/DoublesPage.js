@@ -12,7 +12,7 @@ import {
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "doubles-v1.5.0";
+const APP_VERSION = "doubles-v1.5.5";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -38,6 +38,7 @@ function scoreLabel(n) {
 
 // ----------------- Payout helpers (Team payouts) -----------------
 const DEFAULT_PAYOUT_CONFIG = {
+  enabled: true, // ✅ new
   buyInDollars: 5, // per PLAYER buy-in (pot uses total players checked in)
   leagueFeePct: 10,
   updatedAt: null,
@@ -250,6 +251,12 @@ function computeTiePlacesAsc(rowsSorted) {
   return places;
 }
 
+function rangeOptions(min, max) {
+  const out = [];
+  for (let i = min; i <= max; i++) out.push(i);
+  return out;
+}
+
 // ----------------- Page -----------------
 export default function DoublesPage() {
   const COLORS = {
@@ -309,8 +316,15 @@ export default function DoublesPage() {
   const [lateCardId, setLateCardId] = useState("");
   const [lateMsg, setLateMsg] = useState("");
 
-  // ✅ Payout UI (similar to Putting, but single Team pot)
+  // ✅ Payout UI (Teams)
   const [payoutsOpen, setPayoutsOpen] = useState(false);
+
+  // ✅ Enable payouts toggle
+  const [payoutEnabled, setPayoutEnabled] = useState(
+    !!DEFAULT_PAYOUT_CONFIG.enabled
+  );
+
+  // ✅ now SELECT values (0..50)
   const [payoutBuyIn, setPayoutBuyIn] = useState(
     DEFAULT_PAYOUT_CONFIG.buyInDollars
   );
@@ -396,8 +410,14 @@ export default function DoublesPage() {
         setLayoutNote(safe.layoutNote || "");
 
         // sync payout UI fields
-        setPayoutBuyIn(clampInt(safe.payoutConfig?.buyInDollars, 1, 50));
-        setPayoutFeePct(clampInt(safe.payoutConfig?.leagueFeePct, 1, 50));
+        const enabled =
+          safe.payoutConfig?.enabled === undefined
+            ? !!DEFAULT_PAYOUT_CONFIG.enabled
+            : !!safe.payoutConfig.enabled;
+        setPayoutEnabled(enabled);
+
+        setPayoutBuyIn(clampInt(safe.payoutConfig?.buyInDollars, 0, 50));
+        setPayoutFeePct(clampInt(safe.payoutConfig?.leagueFeePct, 0, 50));
 
         // default late card selection
         if (!lateCardId && (safe.cards || []).length) {
@@ -425,7 +445,9 @@ export default function DoublesPage() {
       ? doubles.payoutsPosted
       : {};
 
-  const hasPostedPayouts = Object.keys(payoutsPosted || {}).length > 0;
+  const payoutsAreEnabled = payoutConfig?.enabled !== false; // default true
+  const hasPostedPayouts =
+    payoutsAreEnabled && Object.keys(payoutsPosted || {}).length > 0;
 
   const checkinStatus = useMemo(() => {
     if (!checkins.length) return "No players checked in yet.";
@@ -922,9 +944,12 @@ export default function DoublesPage() {
 
   // ----------------- Payout actions (Team payouts) -----------------
   function computeTeamPayoutsCents() {
+    if (!payoutsAreEnabled)
+      return { ok: false, reason: "Payouts are disabled." };
+
     // pot is based on PLAYERS (checkins), paid to TEAMS (leaderboard rows)
-    const buyIn = clampInt(payoutConfig.buyInDollars, 1, 50);
-    const feePct = clampInt(payoutConfig.leagueFeePct, 1, 50);
+    const buyIn = clampInt(payoutConfig.buyInDollars, 0, 50);
+    const feePct = clampInt(payoutConfig.leagueFeePct, 0, 50);
 
     const playerCount = checkins.length;
     const teamCount = leaderboard.length;
@@ -972,11 +997,12 @@ export default function DoublesPage() {
 
   async function savePayoutConfig() {
     await requireAdmin(async () => {
-      const buyIn = clampInt(payoutBuyIn, 1, 50);
-      const feePct = clampInt(payoutFeePct, 1, 50);
+      const buyIn = clampInt(payoutBuyIn, 0, 50);
+      const feePct = clampInt(payoutFeePct, 0, 50);
 
       await updateDoc(leagueRef, {
         "doubles.payoutConfig": {
+          enabled: !!payoutEnabled,
           buyInDollars: buyIn,
           leagueFeePct: feePct,
           updatedAt: Date.now(),
@@ -990,8 +1016,31 @@ export default function DoublesPage() {
     });
   }
 
+  async function togglePayoutsEnabled(nextEnabled) {
+    await requireAdmin(async () => {
+      await updateDoc(leagueRef, {
+        "doubles.payoutConfig.enabled": !!nextEnabled,
+        "doubles.payoutsPosted": {}, // ✅ clear any posted payouts when toggling
+        "doubles.updatedAt": Date.now(),
+      });
+
+      setPayoutEnabled(!!nextEnabled);
+      setPayoutsOpen(false);
+      alert(
+        nextEnabled
+          ? "Payouts enabled ✅ (posted payouts cleared)"
+          : "Payouts disabled ✅ (posted payouts cleared)"
+      );
+    });
+  }
+
   async function postPayoutsToLeaderboard() {
     await requireAdmin(async () => {
+      if (!payoutsAreEnabled) {
+        alert("Payouts are disabled.");
+        return;
+      }
+
       const res = computeTeamPayoutsCents();
       if (!res.ok) {
         alert(res.reason || "Unable to compute payouts.");
@@ -1091,9 +1140,9 @@ export default function DoublesPage() {
   // Convenience: show payout config summary
   const payoutSummary = `${clampInt(
     payoutConfig.buyInDollars,
-    1,
+    0,
     50
-  )} buy-in • ${clampInt(payoutConfig.leagueFeePct, 1, 50)}% fee`;
+  )} buy-in • ${clampInt(payoutConfig.leagueFeePct, 0, 50)}% fee`;
 
   return (
     <div style={pageWrap}>
@@ -1130,26 +1179,35 @@ export default function DoublesPage() {
                   <b>Check-in:</b> {checkinStatus}
                 </div>
                 <div style={{ marginTop: 6 }}>
-                  <b>Payouts:</b> {payoutSummary}
-                  {hasPostedPayouts ? (
-                    <span
-                      style={{
-                        marginLeft: 8,
-                        fontWeight: 900,
-                        color: COLORS.green,
-                      }}
-                    >
-                      • Posted
-                    </span>
+                  <b>Payouts:</b>{" "}
+                  {payoutsAreEnabled ? (
+                    <>
+                      {payoutSummary}
+                      {hasPostedPayouts ? (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            fontWeight: 900,
+                            color: COLORS.green,
+                          }}
+                        >
+                          • Posted
+                        </span>
+                      ) : (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            fontWeight: 900,
+                            color: COLORS.muted,
+                          }}
+                        >
+                          • Not posted
+                        </span>
+                      )}
+                    </>
                   ) : (
-                    <span
-                      style={{
-                        marginLeft: 8,
-                        fontWeight: 900,
-                        color: COLORS.muted,
-                      }}
-                    >
-                      • Not posted
+                    <span style={{ fontWeight: 900, color: COLORS.muted }}>
+                      Off
                     </span>
                   )}
                 </div>
@@ -1487,8 +1545,12 @@ export default function DoublesPage() {
               <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                 {leaderboard.map((e) => {
                   const place = tiePlaces[e.teamId] || 1;
+
                   const payoutCents =
-                    Number(payoutsPosted?.[e.teamId] ?? 0) || 0;
+                    payoutsAreEnabled && hasPostedPayouts
+                      ? Number(payoutsPosted?.[e.teamId] ?? 0) || 0
+                      : 0;
+
                   const isPaid = payoutCents > 0;
                   const badgeBg = isPaid ? COLORS.green : COLORS.navy;
 
@@ -1527,7 +1589,13 @@ export default function DoublesPage() {
                             background: badgeBg,
                             flexShrink: 0,
                           }}
-                          title={isPaid ? "Paid out" : "Not paid"}
+                          title={
+                            payoutsAreEnabled && hasPostedPayouts
+                              ? isPaid
+                                ? "Paid out"
+                                : "Not paid"
+                              : "Placement"
+                          }
                         >
                           {place}
                         </div>
@@ -1564,7 +1632,7 @@ export default function DoublesPage() {
                             }}
                           >
                             {e.teamName || "Team"}
-                            {hasPostedPayouts ? (
+                            {payoutsAreEnabled && hasPostedPayouts ? (
                               <span
                                 style={{
                                   marginLeft: 8,
@@ -1726,117 +1794,23 @@ export default function DoublesPage() {
                 </div>
 
                 <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                  {/* Enable toggle */}
                   <div
                     style={{
-                      fontSize: 12,
-                      color: COLORS.muted,
-                      fontWeight: 900,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      padding: 12,
+                      borderRadius: 14,
+                      border: `1px solid ${COLORS.border}`,
+                      background: COLORS.soft,
                     }}
                   >
-                    Current:{" "}
-                    <span style={{ color: COLORS.navy }}>{payoutSummary}</span>
-                    {hasPostedPayouts ? (
-                      <span
-                        style={{
-                          marginLeft: 8,
-                          color: COLORS.green,
-                          fontWeight: 1000,
-                        }}
-                      >
-                        • Posted
-                      </span>
-                    ) : (
-                      <span
-                        style={{
-                          marginLeft: 8,
-                          color: COLORS.muted,
-                          fontWeight: 1000,
-                        }}
-                      >
-                        • Not posted
-                      </span>
-                    )}
-                  </div>
-
-                  <button
-                    style={{
-                      ...button(false),
-                      border: `2px solid ${COLORS.navy}`,
-                      background: "#fff",
-                    }}
-                    onClick={() =>
-                      requireAdmin(async () => {
-                        setPayoutsOpen((v) => !v);
-                      })
-                    }
-                  >
-                    {payoutsOpen
-                      ? "Close Payout Configuration"
-                      : "Configure Payouts"}
-                  </button>
-
-                  {payoutsOpen && (
-                    <div
-                      style={{
-                        border: `1px solid ${COLORS.border}`,
-                        borderRadius: 14,
-                        padding: 12,
-                        background: COLORS.soft,
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
-                      <label
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 1000,
-                          color: COLORS.navy,
-                        }}
-                      >
-                        Buy-In per PLAYER ($)
-                        <input
-                          style={{ ...input, marginTop: 6 }}
-                          type="number"
-                          min={1}
-                          max={50}
-                          value={payoutBuyIn}
-                          onChange={(e) => setPayoutBuyIn(e.target.value)}
-                        />
-                      </label>
-
-                      <label
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 1000,
-                          color: COLORS.navy,
-                        }}
-                      >
-                        League Fee (%)
-                        <input
-                          style={{ ...input, marginTop: 6 }}
-                          type="number"
-                          min={1}
-                          max={50}
-                          value={payoutFeePct}
-                          onChange={(e) => setPayoutFeePct(e.target.value)}
-                        />
-                      </label>
-
-                      <button
-                        style={{
-                          padding: "12px 14px",
-                          borderRadius: 12,
-                          border: `2px solid ${COLORS.green}`,
-                          background: COLORS.green,
-                          color: "white",
-                          fontWeight: 1000,
-                          cursor: "pointer",
-                        }}
-                        onClick={savePayoutConfig}
-                      >
-                        Save Payout Settings (Admin)
-                      </button>
-
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                        Enable Payouts
+                      </div>
                       <div
                         style={{
                           fontSize: 12,
@@ -1844,45 +1818,211 @@ export default function DoublesPage() {
                           fontWeight: 900,
                         }}
                       >
-                        Saving clears posted payouts (if any).
+                        When Off, payout configuration + posting is hidden.
                       </div>
                     </div>
-                  )}
 
-                  <button
-                    style={{
-                      padding: "12px 14px",
-                      borderRadius: 12,
-                      border: `2px solid ${COLORS.red}`,
-                      background: "#fff",
-                      fontWeight: 1000,
-                      cursor: "pointer",
-                    }}
-                    onClick={postPayoutsToLeaderboard}
-                    disabled={leaderboard.length === 0}
-                    title={
-                      leaderboard.length === 0
-                        ? "Need scores on the leaderboard first."
-                        : "Posts payouts and turns paid place badges green."
-                    }
-                  >
-                    Post Payouts to Leaderboard (Admin)
-                  </button>
-
-                  {hasPostedPayouts && (
                     <button
                       style={{
-                        padding: "12px 14px",
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background: "#fff",
-                        fontWeight: 900,
+                        padding: "10px 14px",
+                        borderRadius: 999,
+                        border: `2px solid ${
+                          payoutsAreEnabled ? COLORS.green : COLORS.navy
+                        }`,
+                        background: payoutsAreEnabled ? COLORS.green : "#fff",
+                        color: payoutsAreEnabled ? "white" : COLORS.navy,
+                        fontWeight: 1000,
                         cursor: "pointer",
+                        whiteSpace: "nowrap",
                       }}
-                      onClick={clearPostedPayouts}
+                      onClick={() => togglePayoutsEnabled(!payoutsAreEnabled)}
+                      title="Toggling clears any posted payouts."
                     >
-                      Clear Posted Payouts (Admin)
+                      {payoutsAreEnabled ? "On" : "Off"}
                     </button>
+                  </div>
+
+                  {payoutsAreEnabled ? (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: COLORS.muted,
+                          fontWeight: 900,
+                        }}
+                      >
+                        Current:{" "}
+                        <span style={{ color: COLORS.navy }}>
+                          {payoutSummary}
+                        </span>
+                        {hasPostedPayouts ? (
+                          <span
+                            style={{
+                              marginLeft: 8,
+                              color: COLORS.green,
+                              fontWeight: 1000,
+                            }}
+                          >
+                            • Posted
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              marginLeft: 8,
+                              color: COLORS.muted,
+                              fontWeight: 1000,
+                            }}
+                          >
+                            • Not posted
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Configure button only when enabled */}
+                      <button
+                        style={{
+                          ...button(false),
+                          border: `2px solid ${COLORS.navy}`,
+                          background: "#fff",
+                        }}
+                        onClick={() =>
+                          requireAdmin(async () => {
+                            setPayoutsOpen((v) => !v);
+                          })
+                        }
+                      >
+                        {payoutsOpen
+                          ? "Close Payout Configuration"
+                          : "Configure Payouts"}
+                      </button>
+
+                      {payoutsOpen && (
+                        <div
+                          style={{
+                            border: `1px solid ${COLORS.border}`,
+                            borderRadius: 14,
+                            padding: 12,
+                            background: COLORS.soft,
+                            display: "grid",
+                            gap: 10,
+                          }}
+                        >
+                          <label
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 1000,
+                              color: COLORS.navy,
+                            }}
+                          >
+                            Buy-In per PLAYER ($)
+                            <select
+                              style={{ ...input, marginTop: 6 }}
+                              value={String(payoutBuyIn)}
+                              onChange={(e) => setPayoutBuyIn(e.target.value)}
+                            >
+                              {rangeOptions(0, 50).map((v) => (
+                                <option key={v} value={v}>
+                                  {v}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 1000,
+                              color: COLORS.navy,
+                            }}
+                          >
+                            League Fee (%)
+                            <select
+                              style={{ ...input, marginTop: 6 }}
+                              value={String(payoutFeePct)}
+                              onChange={(e) => setPayoutFeePct(e.target.value)}
+                            >
+                              {rangeOptions(0, 50).map((v) => (
+                                <option key={v} value={v}>
+                                  {v}%
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <button
+                            style={{
+                              padding: "12px 14px",
+                              borderRadius: 12,
+                              border: `2px solid ${COLORS.green}`,
+                              background: COLORS.green,
+                              color: "white",
+                              fontWeight: 1000,
+                              cursor: "pointer",
+                            }}
+                            onClick={savePayoutConfig}
+                          >
+                            Save Payout Settings (Admin)
+                          </button>
+
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: COLORS.muted,
+                              fontWeight: 900,
+                            }}
+                          >
+                            Saving clears posted payouts (if any).
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        style={{
+                          padding: "12px 14px",
+                          borderRadius: 12,
+                          border: `2px solid ${COLORS.red}`,
+                          background: "#fff",
+                          fontWeight: 1000,
+                          cursor: "pointer",
+                        }}
+                        onClick={postPayoutsToLeaderboard}
+                        disabled={leaderboard.length === 0}
+                        title={
+                          leaderboard.length === 0
+                            ? "Need scores on the leaderboard first."
+                            : "Posts payouts and turns paid place badges green."
+                        }
+                      >
+                        Post Payouts to Leaderboard (Admin)
+                      </button>
+
+                      {hasPostedPayouts && (
+                        <button
+                          style={{
+                            padding: "12px 14px",
+                            borderRadius: 12,
+                            border: `2px solid ${COLORS.navy}`,
+                            background: "#fff",
+                            fontWeight: 900,
+                            cursor: "pointer",
+                          }}
+                          onClick={clearPostedPayouts}
+                        >
+                          Clear Posted Payouts (Admin)
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: COLORS.muted,
+                        fontWeight: 900,
+                        padding: 8,
+                      }}
+                    >
+                      Payouts are currently <b>Off</b>.
+                    </div>
                   )}
                 </div>
               </div>
