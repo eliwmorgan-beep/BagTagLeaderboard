@@ -13,7 +13,7 @@ import {
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.6.2";
+const APP_VERSION = "v1.5.2";
 
 const DEFAULT_PAYOUT_CONFIG = {
   buyInDollars: 5,
@@ -50,7 +50,7 @@ function clampMade(v) {
  */
 function computeCardSizesNoOnes(n) {
   if (n <= 0) return [];
-  if (n === 1) return [1]; // should never happen in our flow (we require >=2 players)
+  if (n === 1) return [1]; // should never happen (we require >=2 players)
   if (n === 2) return [2];
   if (n === 3) return [3];
   if (n === 4) return [4];
@@ -61,12 +61,11 @@ function computeCardSizesNoOnes(n) {
   // Score tuple: [num2, num4, length] and we MINIMIZE it.
   // - fewer 2s first
   // - then fewer 4s
-  // - then fewer total cards (shorter list)
+  // - then fewer total cards
   const best = Array.from({ length: n + 1 }, () => null);
   best[0] = { combo: [], score: [0, 0, 0] };
 
   function betterScore(a, b) {
-    // true if a is better (smaller lexicographically)
     for (let i = 0; i < a.length; i++) {
       if (a[i] < b[i]) return true;
       if (a[i] > b[i]) return false;
@@ -95,18 +94,26 @@ function computeCardSizesNoOnes(n) {
   }
 
   const result = best[n]?.combo || [];
-  // Safety: ensure no 1s
   if (result.some((x) => x === 1)) {
     // fallback (should not happen)
     return Array.from({ length: Math.floor(n / 3) }, () => 3).concat(
       n % 3 === 2 ? [2] : n % 3 === 1 ? [4] : []
     );
   }
-
   return result;
 }
 
 // ---------- Payout helpers ----------
+function toCents(dollars) {
+  const n = Number(dollars);
+  if (Number.isNaN(n)) return 0;
+  return Math.round(n * 100);
+}
+
+function fromCents(cents) {
+  return (Number(cents || 0) / 100).toFixed(2);
+}
+
 function clampInt(n, min, max) {
   const x = Number(n);
   if (Number.isNaN(x)) return min;
@@ -132,60 +139,91 @@ function sharesByPoolMode(nPlaces) {
 // Collective weights, ordered by priority: A1, A2, A3, B1, B2, C1 (strictly descending)
 const COLLECTIVE_BASE_WEIGHTS = [30, 20, 15, 14, 11, 10]; // sums 100
 
-function scaleWeightsToFractions(weights) {
+function scaleWeightsTo100(weights) {
   const sum = weights.reduce((a, b) => a + b, 0);
   if (!sum) return [];
   return weights.map((w) => w / sum); // fractions summing to 1
 }
 
-// Allocate INTEGER dollars across positions so total == potDollars,
-// using "largest remainder" to avoid exceeding the pot.
-function allocatePositionAmountsDollars(potDollars, shares) {
-  const n = shares.length;
-  if (!n || potDollars <= 0) return Array(n).fill(0);
+/**
+ * Whole-dollar allocation across paid positions that:
+ *  - uses only whole dollars
+ *  - never exceeds potDollars
+ *  - sum equals potDollars (if potDollars > 0)
+ * Strategy:
+ *  1) floor each desired amount
+ *  2) distribute remaining dollars one-by-one to the largest fractional remainders
+ */
+function allocateWholeDollarsByShares(positionShares, potCents) {
+  const n = positionShares.length;
+  if (!n || potCents <= 0) return [];
 
-  const floats = shares.map((s) => s * potDollars);
-  const floors = floats.map((x) => Math.floor(x));
+  const potDollars = Math.floor(potCents / 100);
+  if (potDollars <= 0) return new Array(n).fill(0);
+
+  const ideal = positionShares.map((s) => potDollars * (Number(s) || 0));
+  const floors = ideal.map((x) => Math.floor(x));
   let used = floors.reduce((a, b) => a + b, 0);
-  let remaining = potDollars - used;
 
-  const frac = floats.map((x, i) => ({
-    i,
-    f: x - Math.floor(x),
-  }));
-
-  frac.sort((a, b) => b.f - a.f);
-
-  const amounts = [...floors];
-  let idx = 0;
-  while (remaining > 0 && idx < frac.length) {
-    amounts[frac[idx].i] += 1;
-    remaining -= 1;
-    idx += 1;
-    if (idx >= frac.length && remaining > 0) idx = 0; // safety (should rarely matter)
+  // If somehow floors exceed potDollars (shouldn't), clamp down
+  if (used > potDollars) {
+    // remove dollars from smallest fractional parts first
+    const frac = ideal.map((x, i) => ({ i, frac: x - Math.floor(x) }));
+    frac.sort((a, b) => a.frac - b.frac); // smallest fractions lose first
+    let over = used - potDollars;
+    const out = [...floors];
+    for (const f of frac) {
+      if (over <= 0) break;
+      if (out[f.i] > 0) {
+        out[f.i] -= 1;
+        over -= 1;
+      }
+    }
+    return out;
   }
 
-  // sanity clamp
-  const sum = amounts.reduce((a, b) => a + b, 0);
-  if (sum > potDollars) {
-    // remove extras from the end
-    let extra = sum - potDollars;
-    for (let i = amounts.length - 1; i >= 0 && extra > 0; i--) {
-      const take = Math.min(extra, amounts[i]);
-      amounts[i] -= take;
-      extra -= take;
+  // Distribute leftover dollars to largest fractional remainders
+  const frac = ideal.map((x, i) => ({ i, frac: x - Math.floor(x) }));
+  frac.sort((a, b) => b.frac - a.frac);
+
+  const out = [...floors];
+  let remaining = potDollars - used;
+
+  let idx = 0;
+  while (remaining > 0 && idx < 100000) {
+    const pick = frac[idx % frac.length];
+    out[pick.i] += 1;
+    remaining -= 1;
+    idx += 1;
+  }
+
+  // Safety: never exceed potDollars
+  const sumOut = out.reduce((a, b) => a + b, 0);
+  if (sumOut > potDollars) {
+    let over = sumOut - potDollars;
+    // remove from last positions first (lowest priority)
+    for (let i = out.length - 1; i >= 0 && over > 0; i--) {
+      const take = Math.min(out[i], over);
+      out[i] -= take;
+      over -= take;
     }
   }
 
-  return amounts;
+  return out;
 }
 
-// Tie-aware payout calculator for a single pool, using POSITION AMOUNTS in dollars.
-// rowsSorted must be sorted desc by total: [{id,total,name}]
-function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
-  const nPositions = positionAmounts.length;
-  const potDollars = positionAmounts.reduce((a, b) => a + b, 0);
-  if (!rowsSorted.length || nPositions === 0 || potDollars <= 0) return {};
+/**
+ * Tie-aware payout calculator for a single pool (WHOLE DOLLARS ONLY):
+ * rowsSorted must be sorted desc by total: [{id,total,name}]
+ * positionShares: array where index 0 = position 1 share
+ * Returns: { [playerId]: cents } where cents is multiple of 100
+ */
+function computeTieAwarePayoutsForPool(rowsSorted, positionShares, potCents) {
+  const nPositions = positionShares.length;
+  if (!rowsSorted.length || nPositions === 0 || potCents <= 0) return {};
+
+  const posDollars = allocateWholeDollarsByShares(positionShares, potCents); // length = nPositions
+  const payouts = {};
 
   // Build tie groups
   const groups = [];
@@ -196,13 +234,9 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     else last.members.push(r);
   }
 
-  const payouts = {};
   let pos = 1; // 1-based position counter
-
   for (const g of groups) {
     const groupSize = g.members.length;
-
-    // This tie group occupies positions pos..pos+groupSize-1
     const start = pos;
     const end = pos + groupSize - 1;
 
@@ -211,18 +245,20 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     const coveredStart = Math.max(start, 1);
     const coveredEnd = Math.min(end, nPositions);
 
+    // Sum the dollars allocated to covered positions
     let groupDollars = 0;
     for (let p = coveredStart; p <= coveredEnd; p++) {
-      groupDollars += positionAmounts[p - 1] || 0;
+      groupDollars += posDollars[p - 1] || 0;
     }
 
     if (groupDollars > 0) {
-      const perMember = Math.floor(groupDollars / groupSize);
-      let rem = groupDollars - perMember * groupSize;
+      const per = Math.floor(groupDollars / groupSize);
+      let rem = groupDollars - per * groupSize;
 
       g.members.forEach((m) => {
-        payouts[m.id] = (payouts[m.id] || 0) + perMember + (rem > 0 ? 1 : 0);
+        const add = per + (rem > 0 ? 1 : 0);
         if (rem > 0) rem -= 1;
+        payouts[m.id] = (payouts[m.id] || 0) + add * 100; // whole dollars -> cents
       });
     }
 
@@ -230,34 +266,58 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     if (pos > nPositions) break;
   }
 
+  // Safety: ensure we did not exceed pot dollars (in case of weirdness)
+  const totalPaidCents = Object.values(payouts).reduce(
+    (a, b) => a + (Number(b) || 0),
+    0
+  );
+  if (totalPaidCents > Math.floor(potCents / 100) * 100) {
+    // clamp by removing from lowest paid winners first (rare)
+    const entries = Object.entries(payouts).sort(
+      (a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0)
+    );
+    let over = totalPaidCents - Math.floor(potCents / 100) * 100;
+    for (let i = entries.length - 1; i >= 0 && over > 0; i--) {
+      const [pid, cents] = entries[i];
+      const take = Math.min(Number(cents) || 0, over);
+      payouts[pid] = (Number(cents) || 0) - take;
+      over -= take;
+    }
+  }
+
   return payouts;
 }
 
-// Compute "competition ranking" ranks with ties:
-// 1,2,2,2,5,...
-function computeTiedRanks(rowsSorted) {
-  const ranks = [];
-  let prevTotal = null;
-  let prevRank = 1;
+/**
+ * Build tie-aware placements for a sorted leaderboard:
+ * - if 2nd-5th tie, all show place=2
+ * Returns: { [playerId]: placeNumber }
+ */
+function computeTiePlaces(rowsSorted) {
+  const places = {};
+  let lastTotal = null;
+  let lastPlace = 0;
 
-  rowsSorted.forEach((r, idx) => {
-    if (idx === 0) {
-      ranks.push(1);
-      prevTotal = r.total;
-      prevRank = 1;
-      return;
+  for (let i = 0; i < rowsSorted.length; i++) {
+    const r = rowsSorted[i];
+    if (lastTotal === null) {
+      lastTotal = r.total;
+      lastPlace = 1;
+      places[r.id] = 1;
+      continue;
     }
-    if (r.total === prevTotal) {
-      ranks.push(prevRank);
+
+    // tie
+    if (r.total === lastTotal) {
+      places[r.id] = lastPlace;
     } else {
-      const rank = idx + 1;
-      ranks.push(rank);
-      prevRank = rank;
-      prevTotal = r.total;
+      // competition ranking: next place is i+1
+      lastTotal = r.total;
+      lastPlace = i + 1;
+      places[r.id] = lastPlace;
     }
-  });
-
-  return ranks;
+  }
+  return places;
 }
 
 export default function PuttingPage() {
@@ -315,14 +375,12 @@ export default function PuttingPage() {
     scores: {},
     submitted: {},
     adjustments: {},
-    // ✅ never null (prevents Firestore dot-path failures)
     payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-    // ✅ CHANGED: payouts are stored as INTEGER DOLLARS now: { [playerId]: dollars }
-    payoutsPosted: {},
+    payoutsPosted: {}, // { [playerId]: cents }
   });
 
   // UI state
-  const [setupOpen, setSetupOpen] = useState(false); // Admin Tools collapsed by default
+  const [setupOpen, setSetupOpen] = useState(false);
   const [checkinOpen, setCheckinOpen] = useState(true);
   const [cardsOpen, setCardsOpen] = useState(true);
   const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
@@ -338,12 +396,12 @@ export default function PuttingPage() {
   const [pool, setPool] = useState("A");
 
   // Manual card creation UI (Round 1)
-  const [selectedForCard, setSelectedForCard] = useState([]); // playerIds
+  const [selectedForCard, setSelectedForCard] = useState([]);
   const [cardName, setCardName] = useState("");
 
   // Scorekeeper selection UI
   const [activeCardId, setActiveCardId] = useState("");
-  const [openStations, setOpenStations] = useState({}); // {stationNum: bool}
+  const [openStations, setOpenStations] = useState({});
 
   // Admin unlock window (prevents password prompt on every leaderboard edit keystroke)
   const [adminOkUntil, setAdminOkUntil] = useState(0);
@@ -372,16 +430,11 @@ export default function PuttingPage() {
       ? putting.adjustments
       : {};
 
-  // always provide an object fallback (never null)
   const payoutConfig =
     putting.payoutConfig && typeof putting.payoutConfig === "object"
-      ? {
-          ...DEFAULT_PAYOUT_CONFIG,
-          ...putting.payoutConfig,
-        }
+      ? { ...DEFAULT_PAYOUT_CONFIG, ...putting.payoutConfig }
       : { ...DEFAULT_PAYOUT_CONFIG };
 
-  // payoutsPosted: stored as INTEGER dollars
   const payoutsPosted =
     putting.payoutsPosted && typeof putting.payoutsPosted === "object"
       ? putting.payoutsPosted
@@ -517,7 +570,7 @@ export default function PuttingPage() {
             submitted: {},
             adjustments: {},
             payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-            payoutsPosted: {}, // dollars
+            payoutsPosted: {},
           },
         });
       }
@@ -604,7 +657,6 @@ export default function PuttingPage() {
       if (ids.length > 4)
         return { ok: false, reason: "A card has more than 4 players." };
 
-      // allow 2,3,4 (disallow 1)
       if (ids.length < 2) {
         return {
           ok: false,
@@ -908,7 +960,6 @@ export default function PuttingPage() {
     alert("Scores finalized. Leaderboards are now locked.");
   }
 
-  // ✅ NOW REQUIRES ADMIN PASSWORD
   async function resetPuttingLeague() {
     await requireAdmin(async () => {
       const ok = window.confirm(
@@ -932,7 +983,7 @@ export default function PuttingPage() {
           submitted: {},
           adjustments: {},
           payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-          payoutsPosted: {}, // dollars
+          payoutsPosted: {},
         },
       });
 
@@ -992,7 +1043,6 @@ export default function PuttingPage() {
     }));
   }
 
-  // Blank = unrecorded; recorded 0 is valid
   async function setMade(roundNum, stationNum, playerId, made) {
     if (finalized) return;
 
@@ -1060,7 +1110,7 @@ export default function PuttingPage() {
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
 
-      const payoutDollars = Number(payoutsPosted?.[p.id] ?? 0) || 0;
+      const payoutCents = Number(payoutsPosted?.[p.id] ?? 0) || 0;
 
       const row = {
         id: p.id,
@@ -1068,7 +1118,7 @@ export default function PuttingPage() {
         pool: p.pool,
         total,
         adj,
-        payoutDollars,
+        payoutCents,
       };
       if (p.pool === "B") pools.B.push(row);
       else if (p.pool === "C") pools.C.push(row);
@@ -1082,21 +1132,26 @@ export default function PuttingPage() {
     return pools;
   }, [players, scores, stations, totalRounds, adjustments, payoutsPosted]);
 
-  // -------- Payout computation + posting (FULL DOLLARS ONLY) --------
-  function computeAllPayoutsDollars() {
-    if (!payoutConfig)
-      return { ok: false, reason: "No payout configuration set." };
+  // ✅ Tie-aware placements per pool (so ties show same number)
+  const tiePlacesByPool = useMemo(() => {
+    return {
+      A: computeTiePlaces(leaderboardByPool.A || []),
+      B: computeTiePlaces(leaderboardByPool.B || []),
+      C: computeTiePlaces(leaderboardByPool.C || []),
+    };
+  }, [leaderboardByPool]);
 
+  // -------- Payout computation + posting --------
+  function computeAllPayoutsCents() {
     const buyIn = clampInt(payoutConfig.buyInDollars, 1, 20);
     const feePct = clampInt(payoutConfig.leagueFeePct, 1, 50);
     const mode = payoutConfig.mode;
 
     if (!players.length) return { ok: false, reason: "No players checked in." };
 
-    // IMPORTANT: full dollars only
-    const totalPotDollars = buyIn * players.length;
-    const feeDollars = Math.round((totalPotDollars * feePct) / 100);
-    const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
+    const totalPotCents = toCents(buyIn) * players.length;
+    const feeCents = Math.round((totalPotCents * feePct) / 100);
+    const potAfterFeeCents = Math.max(0, totalPotCents - feeCents);
 
     // Build sorted rows per pool (desc by total)
     const pools = {
@@ -1122,33 +1177,23 @@ export default function PuttingPage() {
     const countC = pools.C.length;
 
     if (mode === "pool") {
-      // Separate pot per pool, full dollars only
+      // Separate pot per pool
       const payouts = {};
 
-      const poolPotDollars = (poolCount) => {
-        const poolTotal = buyIn * poolCount;
+      const poolPot = (poolCount) => {
+        const poolTotal = toCents(buyIn) * poolCount;
         const poolFee = Math.round((poolTotal * feePct) / 100);
         return Math.max(0, poolTotal - poolFee);
       };
 
       const doPool = (key) => {
         const rows = pools[key];
-        const pot = poolPotDollars(rows.length);
-
+        const pot = poolPot(rows.length);
         const places = payoutPlacesForPoolSize(rows.length);
         const shares = sharesByPoolMode(places);
-
-        // Allocate position amounts as integer dollars (never exceeds pot)
-        const positionAmounts = allocatePositionAmountsDollars(pot, shares);
-
-        // Tie-aware distribution from those position amounts
-        const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
-          rows,
-          positionAmounts
-        );
-
-        Object.entries(poolPayouts).forEach(([pid, dollars]) => {
-          payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
+        const poolPayouts = computeTieAwarePayoutsForPool(rows, shares, pot);
+        Object.entries(poolPayouts).forEach(([pid, cents]) => {
+          payouts[pid] = (payouts[pid] || 0) + cents;
         });
       };
 
@@ -1163,19 +1208,18 @@ export default function PuttingPage() {
           buyIn,
           feePct,
           mode,
-          totalPotDollars,
-          feeDollars,
-          potAfterFeeDollars,
+          totalPotCents,
+          feeCents,
+          potAfterFeeCents,
         },
       };
     }
 
-    // Collective mode (full dollars only, across ALL slots, then tie-split inside pools)
+    // Collective mode
     const placesA = payoutPlacesForPoolSize(countA);
     const placesB = payoutPlacesForPoolSize(countB);
     const placesC = payoutPlacesForPoolSize(countC);
 
-    // Build slot list in required order: A1,A2,A3,B1,B2,C1 (only include if pool has that place)
     const slots = [];
     for (let i = 1; i <= Math.min(3, placesA); i++)
       slots.push({ pool: "A", pos: i });
@@ -1184,44 +1228,31 @@ export default function PuttingPage() {
     for (let i = 1; i <= Math.min(1, placesC); i++)
       slots.push({ pool: "C", pos: i });
 
-    if (!slots.length) {
+    if (!slots.length)
       return { ok: false, reason: "No payout slots available." };
-    }
 
-    // Assign scaled weights to existing slots
     const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
-    const slotShares = scaleWeightsToFractions(base); // sums to 1 across slots
+    const slotShares = scaleWeightsTo100(base); // fractions summing to 1
 
-    // Allocate slot amounts as integer dollars across ALL slots (ensures total == potAfterFeeDollars)
-    const slotAmounts = allocatePositionAmountsDollars(
-      potAfterFeeDollars,
-      slotShares
-    );
-
-    // Convert slot amounts into per-pool position amounts
-    const perPoolPositionAmounts = { A: [], B: [], C: [] };
+    // Convert slot shares into per-pool positionShares arrays
+    const perPoolShares = { A: [], B: [], C: [] };
     slots.forEach((slot, idx) => {
-      const amt = slotAmounts[idx] || 0;
-      const posIndex = slot.pos - 1;
-      perPoolPositionAmounts[slot.pool][posIndex] =
-        (perPoolPositionAmounts[slot.pool][posIndex] || 0) + amt;
+      perPoolShares[slot.pool][slot.pos - 1] =
+        (perPoolShares[slot.pool][slot.pos - 1] || 0) + slotShares[idx];
     });
 
-    // Compute payouts per pool using those per-pool position AMOUNTS
     const payouts = {};
     ["A", "B", "C"].forEach((k) => {
-      const amounts = perPoolPositionAmounts[k].filter(
-        (x) => typeof x === "number"
-      );
-      if (!amounts.length) return;
+      const shares = perPoolShares[k].filter((x) => typeof x === "number");
+      if (!shares.length) return;
 
-      const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
+      const poolPayouts = computeTieAwarePayoutsForPool(
         pools[k],
-        amounts
+        shares,
+        potAfterFeeCents
       );
-
-      Object.entries(poolPayouts).forEach(([pid, dollars]) => {
-        payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
+      Object.entries(poolPayouts).forEach(([pid, cents]) => {
+        payouts[pid] = (payouts[pid] || 0) + cents;
       });
     });
 
@@ -1232,9 +1263,9 @@ export default function PuttingPage() {
         buyIn,
         feePct,
         mode,
-        totalPotDollars,
-        feeDollars,
-        potAfterFeeDollars,
+        totalPotCents,
+        feeCents,
+        potAfterFeeCents,
         collectiveWeightsUsed: base,
       },
     };
@@ -1244,19 +1275,19 @@ export default function PuttingPage() {
     if (!finalized) return;
 
     await requireAdmin(async () => {
-      const result = computeAllPayoutsDollars();
+      const result = computeAllPayoutsCents();
       if (!result.ok) {
         alert(result.reason || "Unable to compute payouts.");
         return;
       }
 
       const ok = window.confirm(
-        "Post payouts to the leaderboard?\n\nThis will write FULL DOLLAR amounts next to the winning players."
+        "Post payouts to the leaderboard?\n\nThis will write payout dollar amounts next to the winning players."
       );
       if (!ok) return;
 
       await updatePutting({
-        payoutsPosted: result.payouts, // dollars
+        payoutsPosted: result.payouts,
       });
 
       alert("Payouts posted ✅");
@@ -1540,7 +1571,7 @@ export default function PuttingPage() {
                       : "Edit Leaderboard Scores"}
                   </button>
 
-                  {/* Configure Payouts */}
+                  {/* Configure Payouts (password-gated toggle, inline panel) */}
                   <button
                     onClick={() =>
                       requireAdmin(async () => {
@@ -1571,7 +1602,6 @@ export default function PuttingPage() {
                       : "Configure Payouts"}
                   </button>
 
-                  {/* Inline payout configuration panel */}
                   {payoutsOpen && (
                     <div
                       style={{
@@ -1702,7 +1732,7 @@ export default function PuttingPage() {
                                 mode: modeOk,
                                 updatedAt: Date.now(),
                               },
-                              payoutsPosted: {}, // clear any previously posted payouts if config changes
+                              payoutsPosted: {},
                             });
 
                             setPayoutsOpen(false);
@@ -1727,13 +1757,12 @@ export default function PuttingPage() {
                           textAlign: "left",
                         }}
                       >
-                        Tip: This clears previously posted payouts (if any) so
-                        you don’t accidentally post old numbers.
+                        Tip: This clears previously posted payouts (if any).
                       </div>
                     </div>
                   )}
 
-                  {/* Post Payouts (red outline) */}
+                  {/* Post Payouts */}
                   <button
                     onClick={postPayoutsToLeaderboard}
                     style={{
@@ -1756,7 +1785,6 @@ export default function PuttingPage() {
                     Post Payouts to Leaderboard
                   </button>
 
-                  {/* Optional payout status line */}
                   <div style={{ fontSize: 12, opacity: 0.75 }}>
                     Payouts:{" "}
                     <strong>
@@ -1903,7 +1931,6 @@ export default function PuttingPage() {
                     </div>
                   )}
 
-                  {/* Reset Putting League (ADMIN REQUIRED) */}
                   <button
                     onClick={resetPuttingLeague}
                     style={{
@@ -2182,7 +2209,7 @@ export default function PuttingPage() {
 
                         <div style={{ fontSize: 12, opacity: 0.75 }}>
                           Selected: <strong>{selectedForCard.length}</strong> /
-                          4<span style={{ marginLeft: 8 }}>(min 2)</span>
+                          4 <span style={{ marginLeft: 8 }}>(min 2)</span>
                         </div>
                       </div>
 
@@ -2418,12 +2445,12 @@ export default function PuttingPage() {
                             const open = !!openStations[stNum];
 
                             const stationRows = cardPlayers.map((p) => {
-                              const made = madeFor(currentRound, stNum, p.id); // null or 0..4
+                              const made = madeFor(currentRound, stNum, p.id);
                               return {
                                 id: p.id,
                                 name: p.name,
                                 pool: p.pool,
-                                made, // null means blank
+                                made,
                                 pts: pointsForMade(made ?? 0),
                               };
                             });
@@ -2464,10 +2491,7 @@ export default function PuttingPage() {
 
                                 {open && (
                                   <div
-                                    style={{
-                                      padding: 12,
-                                      background: "#fff",
-                                    }}
+                                    style={{ padding: 12, background: "#fff" }}
                                   >
                                     <div
                                       style={{
@@ -2721,7 +2745,7 @@ export default function PuttingPage() {
                   const label =
                     k === "A" ? "A Pool" : k === "B" ? "B Pool" : "C Pool";
                   const rows = leaderboardByPool[k] || [];
-                  const ranks = computeTiedRanks(rows);
+                  const placesMap = tiePlacesByPool[k] || {};
 
                   return (
                     <div
@@ -2758,12 +2782,18 @@ export default function PuttingPage() {
                           </div>
                         ) : (
                           <div style={{ display: "grid", gap: 8 }}>
-                            {rows.map((r, idx) => {
-                              const place = ranks[idx] || idx + 1;
+                            {rows.map((r) => {
+                              const place = placesMap[r.id] || 1;
+
+                              // ✅ Green badge ONLY if this player actually has a posted payout (>0)
                               const isPaid =
                                 finalized &&
                                 hasPostedPayouts &&
-                                Number(r.payoutDollars || 0) > 0;
+                                (Number(r.payoutCents) || 0) > 0;
+
+                              const badgeBg = isPaid
+                                ? COLORS.green
+                                : COLORS.navy;
 
                               return (
                                 <div
@@ -2787,7 +2817,6 @@ export default function PuttingPage() {
                                       minWidth: 0,
                                     }}
                                   >
-                                    {/* ✅ TIE-AWARE place badge + ✅ green if paid */}
                                     <div
                                       style={{
                                         width: 34,
@@ -2798,16 +2827,10 @@ export default function PuttingPage() {
                                         justifyContent: "center",
                                         fontWeight: 900,
                                         color: "white",
-                                        background: isPaid
-                                          ? COLORS.green
-                                          : COLORS.navy,
+                                        background: badgeBg,
                                         flexShrink: 0,
                                       }}
-                                      title={
-                                        isPaid
-                                          ? "Paid position"
-                                          : "Not paid (or payouts not posted)"
-                                      }
+                                      title={r.total}
                                     >
                                       {place}
                                     </div>
@@ -2835,10 +2858,10 @@ export default function PuttingPage() {
                                             {r.adj})
                                           </span>
                                         ) : null}
-                                        {/* ✅ show FULL dollars */}
+
                                         {finalized &&
                                         hasPostedPayouts &&
-                                        Number(r.payoutDollars || 0) > 0 ? (
+                                        (Number(r.payoutCents) || 0) > 0 ? (
                                           <span
                                             style={{
                                               fontSize: 12,
@@ -2847,7 +2870,7 @@ export default function PuttingPage() {
                                               color: COLORS.green,
                                             }}
                                           >
-                                            ${Number(r.payoutDollars || 0)}
+                                            ${fromCents(r.payoutCents)}
                                           </span>
                                         ) : null}
                                       </div>
