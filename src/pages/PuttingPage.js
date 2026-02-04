@@ -13,7 +13,7 @@ import {
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.7";
+const APP_VERSION = "v1.6.2";
 
 const DEFAULT_PAYOUT_CONFIG = {
   buyInDollars: 5,
@@ -107,16 +107,6 @@ function computeCardSizesNoOnes(n) {
 }
 
 // ---------- Payout helpers ----------
-function toCents(dollars) {
-  const n = Number(dollars);
-  if (Number.isNaN(n)) return 0;
-  return Math.round(n * 100);
-}
-
-function fromCents(cents) {
-  return (Number(cents || 0) / 100).toFixed(2);
-}
-
 function clampInt(n, min, max) {
   const x = Number(n);
   if (Number.isNaN(x)) return min;
@@ -142,18 +132,60 @@ function sharesByPoolMode(nPlaces) {
 // Collective weights, ordered by priority: A1, A2, A3, B1, B2, C1 (strictly descending)
 const COLLECTIVE_BASE_WEIGHTS = [30, 20, 15, 14, 11, 10]; // sums 100
 
-function scaleWeightsTo100(weights) {
+function scaleWeightsToFractions(weights) {
   const sum = weights.reduce((a, b) => a + b, 0);
   if (!sum) return [];
   return weights.map((w) => w / sum); // fractions summing to 1
 }
 
-// Tie-aware payout calculator for a single pool:
-// rows must be sorted desc by total: [{id,total,name}]
-function computeTieAwarePayoutsForPool(rowsSorted, positionShares, potCents) {
-  // positionShares: array where index 0 = position 1 share
-  const nPositions = positionShares.length;
-  if (!rowsSorted.length || nPositions === 0 || potCents <= 0) return {};
+// Allocate INTEGER dollars across positions so total == potDollars,
+// using "largest remainder" to avoid exceeding the pot.
+function allocatePositionAmountsDollars(potDollars, shares) {
+  const n = shares.length;
+  if (!n || potDollars <= 0) return Array(n).fill(0);
+
+  const floats = shares.map((s) => s * potDollars);
+  const floors = floats.map((x) => Math.floor(x));
+  let used = floors.reduce((a, b) => a + b, 0);
+  let remaining = potDollars - used;
+
+  const frac = floats.map((x, i) => ({
+    i,
+    f: x - Math.floor(x),
+  }));
+
+  frac.sort((a, b) => b.f - a.f);
+
+  const amounts = [...floors];
+  let idx = 0;
+  while (remaining > 0 && idx < frac.length) {
+    amounts[frac[idx].i] += 1;
+    remaining -= 1;
+    idx += 1;
+    if (idx >= frac.length && remaining > 0) idx = 0; // safety (should rarely matter)
+  }
+
+  // sanity clamp
+  const sum = amounts.reduce((a, b) => a + b, 0);
+  if (sum > potDollars) {
+    // remove extras from the end
+    let extra = sum - potDollars;
+    for (let i = amounts.length - 1; i >= 0 && extra > 0; i--) {
+      const take = Math.min(extra, amounts[i]);
+      amounts[i] -= take;
+      extra -= take;
+    }
+  }
+
+  return amounts;
+}
+
+// Tie-aware payout calculator for a single pool, using POSITION AMOUNTS in dollars.
+// rowsSorted must be sorted desc by total: [{id,total,name}]
+function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
+  const nPositions = positionAmounts.length;
+  const potDollars = positionAmounts.reduce((a, b) => a + b, 0);
+  if (!rowsSorted.length || nPositions === 0 || potDollars <= 0) return {};
 
   // Build tie groups
   const groups = [];
@@ -174,22 +206,19 @@ function computeTieAwarePayoutsForPool(rowsSorted, positionShares, potCents) {
     const start = pos;
     const end = pos + groupSize - 1;
 
-    if (start > nPositions) break; // group starts after last paid position
+    if (start > nPositions) break;
 
-    // Determine which paid positions are covered by this group
     const coveredStart = Math.max(start, 1);
     const coveredEnd = Math.min(end, nPositions);
 
-    let coveredShare = 0;
+    let groupDollars = 0;
     for (let p = coveredStart; p <= coveredEnd; p++) {
-      coveredShare += positionShares[p - 1] || 0;
+      groupDollars += positionAmounts[p - 1] || 0;
     }
 
-    if (coveredShare > 0) {
-      const groupCents = Math.round(potCents * coveredShare);
-      const perMember = Math.floor(groupCents / groupSize);
-      // distribute remainder pennies
-      let rem = groupCents - perMember * groupSize;
+    if (groupDollars > 0) {
+      const perMember = Math.floor(groupDollars / groupSize);
+      let rem = groupDollars - perMember * groupSize;
 
       g.members.forEach((m) => {
         payouts[m.id] = (payouts[m.id] || 0) + perMember + (rem > 0 ? 1 : 0);
@@ -202,6 +231,33 @@ function computeTieAwarePayoutsForPool(rowsSorted, positionShares, potCents) {
   }
 
   return payouts;
+}
+
+// Compute "competition ranking" ranks with ties:
+// 1,2,2,2,5,...
+function computeTiedRanks(rowsSorted) {
+  const ranks = [];
+  let prevTotal = null;
+  let prevRank = 1;
+
+  rowsSorted.forEach((r, idx) => {
+    if (idx === 0) {
+      ranks.push(1);
+      prevTotal = r.total;
+      prevRank = 1;
+      return;
+    }
+    if (r.total === prevTotal) {
+      ranks.push(prevRank);
+    } else {
+      const rank = idx + 1;
+      ranks.push(rank);
+      prevRank = rank;
+      prevTotal = r.total;
+    }
+  });
+
+  return ranks;
 }
 
 export default function PuttingPage() {
@@ -259,18 +315,19 @@ export default function PuttingPage() {
     scores: {},
     submitted: {},
     adjustments: {},
-    // ✅ CHANGED: never null (prevents Firestore dot-path failures)
+    // ✅ never null (prevents Firestore dot-path failures)
     payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-    payoutsPosted: {}, // ✅ { [playerId]: cents }
+    // ✅ CHANGED: payouts are stored as INTEGER DOLLARS now: { [playerId]: dollars }
+    payoutsPosted: {},
   });
 
   // UI state
-  const [setupOpen, setSetupOpen] = useState(false); // ✅ Admin Tools collapsed by default
+  const [setupOpen, setSetupOpen] = useState(false); // Admin Tools collapsed by default
   const [checkinOpen, setCheckinOpen] = useState(true);
   const [cardsOpen, setCardsOpen] = useState(true);
   const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
 
-  // ✅ Payout config panel open/closed
+  // Payout config panel open/closed
   const [payoutsOpen, setPayoutsOpen] = useState(false);
 
   // Admin adjustment editor UI
@@ -288,7 +345,7 @@ export default function PuttingPage() {
   const [activeCardId, setActiveCardId] = useState("");
   const [openStations, setOpenStations] = useState({}); // {stationNum: bool}
 
-  // ✅ Admin unlock window (prevents password prompt on every leaderboard edit keystroke)
+  // Admin unlock window (prevents password prompt on every leaderboard edit keystroke)
   const [adminOkUntil, setAdminOkUntil] = useState(0);
 
   // -------- Helpers (computed) --------
@@ -315,7 +372,7 @@ export default function PuttingPage() {
       ? putting.adjustments
       : {};
 
-  // ✅ CHANGED: always provide an object fallback (never null)
+  // always provide an object fallback (never null)
   const payoutConfig =
     putting.payoutConfig && typeof putting.payoutConfig === "object"
       ? {
@@ -324,6 +381,7 @@ export default function PuttingPage() {
         }
       : { ...DEFAULT_PAYOUT_CONFIG };
 
+  // payoutsPosted: stored as INTEGER dollars
   const payoutsPosted =
     putting.payoutsPosted && typeof putting.payoutsPosted === "object"
       ? putting.payoutsPosted
@@ -410,7 +468,7 @@ export default function PuttingPage() {
     return cards.filter((c) => !sub?.[c.id]);
   }
 
-  // ✅ Admin password gate (unlocks for 10 minutes)
+  // Admin password gate (unlocks for 10 minutes)
   function requireAdmin(fn) {
     const now = Date.now();
     if (now < adminOkUntil) return fn();
@@ -458,9 +516,8 @@ export default function PuttingPage() {
             scores: {},
             submitted: {},
             adjustments: {},
-            // ✅ CHANGED: never null
             payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-            payoutsPosted: {},
+            payoutsPosted: {}, // dollars
           },
         });
       }
@@ -481,7 +538,6 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
-          // ✅ CHANGED: never null
           payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
           payoutsPosted: {},
         };
@@ -500,7 +556,6 @@ export default function PuttingPage() {
           adjustments: {
             ...(pl.adjustments || {}),
           },
-          // ✅ CHANGED: ensure object fallback (never null)
           payoutConfig:
             pl.payoutConfig && typeof pl.payoutConfig === "object"
               ? { ...DEFAULT_PAYOUT_CONFIG, ...pl.payoutConfig }
@@ -549,7 +604,7 @@ export default function PuttingPage() {
       if (ids.length > 4)
         return { ok: false, reason: "A card has more than 4 players." };
 
-      // ✅ allow 2,3,4 (disallow 1)
+      // allow 2,3,4 (disallow 1)
       if (ids.length < 2) {
         return {
           ok: false,
@@ -876,9 +931,8 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
-          // ✅ CHANGED: never null
           payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-          payoutsPosted: {},
+          payoutsPosted: {}, // dollars
         },
       });
 
@@ -1006,7 +1060,7 @@ export default function PuttingPage() {
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
 
-      const payoutCents = Number(payoutsPosted?.[p.id] ?? 0) || 0;
+      const payoutDollars = Number(payoutsPosted?.[p.id] ?? 0) || 0;
 
       const row = {
         id: p.id,
@@ -1014,7 +1068,7 @@ export default function PuttingPage() {
         pool: p.pool,
         total,
         adj,
-        payoutCents,
+        payoutDollars,
       };
       if (p.pool === "B") pools.B.push(row);
       else if (p.pool === "C") pools.C.push(row);
@@ -1028,8 +1082,8 @@ export default function PuttingPage() {
     return pools;
   }, [players, scores, stations, totalRounds, adjustments, payoutsPosted]);
 
-  // -------- Payout computation + posting --------
-  function computeAllPayoutsCents() {
+  // -------- Payout computation + posting (FULL DOLLARS ONLY) --------
+  function computeAllPayoutsDollars() {
     if (!payoutConfig)
       return { ok: false, reason: "No payout configuration set." };
 
@@ -1039,9 +1093,10 @@ export default function PuttingPage() {
 
     if (!players.length) return { ok: false, reason: "No players checked in." };
 
-    const totalPotCents = toCents(buyIn) * players.length;
-    const feeCents = Math.round((totalPotCents * feePct) / 100);
-    const potAfterFeeCents = Math.max(0, totalPotCents - feeCents);
+    // IMPORTANT: full dollars only
+    const totalPotDollars = buyIn * players.length;
+    const feeDollars = Math.round((totalPotDollars * feePct) / 100);
+    const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
 
     // Build sorted rows per pool (desc by total)
     const pools = {
@@ -1067,23 +1122,33 @@ export default function PuttingPage() {
     const countC = pools.C.length;
 
     if (mode === "pool") {
-      // Separate pot per pool
+      // Separate pot per pool, full dollars only
       const payouts = {};
 
-      const poolPot = (poolCount) => {
-        const poolTotal = toCents(buyIn) * poolCount;
+      const poolPotDollars = (poolCount) => {
+        const poolTotal = buyIn * poolCount;
         const poolFee = Math.round((poolTotal * feePct) / 100);
         return Math.max(0, poolTotal - poolFee);
       };
 
       const doPool = (key) => {
         const rows = pools[key];
-        const pot = poolPot(rows.length);
+        const pot = poolPotDollars(rows.length);
+
         const places = payoutPlacesForPoolSize(rows.length);
         const shares = sharesByPoolMode(places);
-        const poolPayouts = computeTieAwarePayoutsForPool(rows, shares, pot);
-        Object.entries(poolPayouts).forEach(([pid, cents]) => {
-          payouts[pid] = (payouts[pid] || 0) + cents;
+
+        // Allocate position amounts as integer dollars (never exceeds pot)
+        const positionAmounts = allocatePositionAmountsDollars(pot, shares);
+
+        // Tie-aware distribution from those position amounts
+        const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
+          rows,
+          positionAmounts
+        );
+
+        Object.entries(poolPayouts).forEach(([pid, dollars]) => {
+          payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
         });
       };
 
@@ -1098,15 +1163,14 @@ export default function PuttingPage() {
           buyIn,
           feePct,
           mode,
-          totalPotCents,
-          feeCents,
-          potAfterFeeCents,
+          totalPotDollars,
+          feeDollars,
+          potAfterFeeDollars,
         },
       };
     }
 
-    // Collective mode
-    // Determine paid places per pool (based on that pool's size)
+    // Collective mode (full dollars only, across ALL slots, then tie-split inside pools)
     const placesA = payoutPlacesForPoolSize(countA);
     const placesB = payoutPlacesForPoolSize(countB);
     const placesC = payoutPlacesForPoolSize(countC);
@@ -1126,27 +1190,38 @@ export default function PuttingPage() {
 
     // Assign scaled weights to existing slots
     const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
-    const slotShares = scaleWeightsTo100(base); // fractions summing to 1
+    const slotShares = scaleWeightsToFractions(base); // sums to 1 across slots
 
-    // Convert slot shares into per-pool positionShares arrays
-    const perPoolShares = { A: [], B: [], C: [] };
+    // Allocate slot amounts as integer dollars across ALL slots (ensures total == potAfterFeeDollars)
+    const slotAmounts = allocatePositionAmountsDollars(
+      potAfterFeeDollars,
+      slotShares
+    );
+
+    // Convert slot amounts into per-pool position amounts
+    const perPoolPositionAmounts = { A: [], B: [], C: [] };
     slots.forEach((slot, idx) => {
-      perPoolShares[slot.pool][slot.pos - 1] =
-        (perPoolShares[slot.pool][slot.pos - 1] || 0) + slotShares[idx];
+      const amt = slotAmounts[idx] || 0;
+      const posIndex = slot.pos - 1;
+      perPoolPositionAmounts[slot.pool][posIndex] =
+        (perPoolPositionAmounts[slot.pool][posIndex] || 0) + amt;
     });
 
-    // Compute payouts per pool using those per-pool position shares
+    // Compute payouts per pool using those per-pool position AMOUNTS
     const payouts = {};
     ["A", "B", "C"].forEach((k) => {
-      const shares = perPoolShares[k].filter((x) => typeof x === "number");
-      if (!shares.length) return;
-      const poolPayouts = computeTieAwarePayoutsForPool(
-        pools[k],
-        shares,
-        potAfterFeeCents
+      const amounts = perPoolPositionAmounts[k].filter(
+        (x) => typeof x === "number"
       );
-      Object.entries(poolPayouts).forEach(([pid, cents]) => {
-        payouts[pid] = (payouts[pid] || 0) + cents;
+      if (!amounts.length) return;
+
+      const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
+        pools[k],
+        amounts
+      );
+
+      Object.entries(poolPayouts).forEach(([pid, dollars]) => {
+        payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
       });
     });
 
@@ -1157,9 +1232,9 @@ export default function PuttingPage() {
         buyIn,
         feePct,
         mode,
-        totalPotCents,
-        feeCents,
-        potAfterFeeCents,
+        totalPotDollars,
+        feeDollars,
+        potAfterFeeDollars,
         collectiveWeightsUsed: base,
       },
     };
@@ -1169,19 +1244,19 @@ export default function PuttingPage() {
     if (!finalized) return;
 
     await requireAdmin(async () => {
-      const result = computeAllPayoutsCents();
+      const result = computeAllPayoutsDollars();
       if (!result.ok) {
         alert(result.reason || "Unable to compute payouts.");
         return;
       }
 
       const ok = window.confirm(
-        "Post payouts to the leaderboard?\n\nThis will write payout dollar amounts next to the winning players."
+        "Post payouts to the leaderboard?\n\nThis will write FULL DOLLAR amounts next to the winning players."
       );
       if (!ok) return;
 
       await updatePutting({
-        payoutsPosted: result.payouts,
+        payoutsPosted: result.payouts, // dollars
       });
 
       alert("Payouts posted ✅");
@@ -1465,11 +1540,10 @@ export default function PuttingPage() {
                       : "Edit Leaderboard Scores"}
                   </button>
 
-                  {/* ✅ Configure Payouts (NOW: password-gated toggle, inline panel) */}
+                  {/* Configure Payouts */}
                   <button
                     onClick={() =>
                       requireAdmin(async () => {
-                        // ✅ safety net: if somehow missing, create it
                         if (
                           !putting.payoutConfig ||
                           typeof putting.payoutConfig !== "object"
@@ -1497,7 +1571,7 @@ export default function PuttingPage() {
                       : "Configure Payouts"}
                   </button>
 
-                  {/* ✅ Inline payout configuration panel */}
+                  {/* Inline payout configuration panel */}
                   {payoutsOpen && (
                     <div
                       style={{
@@ -1659,7 +1733,7 @@ export default function PuttingPage() {
                     </div>
                   )}
 
-                  {/* ✅ Post Payouts (red outline) */}
+                  {/* Post Payouts (red outline) */}
                   <button
                     onClick={postPayoutsToLeaderboard}
                     style={{
@@ -1829,7 +1903,7 @@ export default function PuttingPage() {
                     </div>
                   )}
 
-                  {/* ✅ Reset Putting League (ADMIN REQUIRED) */}
+                  {/* Reset Putting League (ADMIN REQUIRED) */}
                   <button
                     onClick={resetPuttingLeague}
                     style={{
@@ -2647,6 +2721,7 @@ export default function PuttingPage() {
                   const label =
                     k === "A" ? "A Pool" : k === "B" ? "B Pool" : "C Pool";
                   const rows = leaderboardByPool[k] || [];
+                  const ranks = computeTiedRanks(rows);
 
                   return (
                     <div
@@ -2683,98 +2758,114 @@ export default function PuttingPage() {
                           </div>
                         ) : (
                           <div style={{ display: "grid", gap: 8 }}>
-                            {rows.map((r, idx) => (
-                              <div
-                                key={r.id}
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: 12,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: COLORS.soft,
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: 10,
-                                }}
-                              >
+                            {rows.map((r, idx) => {
+                              const place = ranks[idx] || idx + 1;
+                              const isPaid =
+                                finalized &&
+                                hasPostedPayouts &&
+                                Number(r.payoutDollars || 0) > 0;
+
+                              return (
                                 <div
+                                  key={r.id}
                                   style={{
+                                    padding: "10px 12px",
+                                    borderRadius: 12,
+                                    border: `1px solid ${COLORS.border}`,
+                                    background: COLORS.soft,
                                     display: "flex",
-                                    gap: 10,
+                                    justifyContent: "space-between",
                                     alignItems: "center",
-                                    minWidth: 0,
+                                    gap: 10,
                                   }}
                                 >
                                   <div
                                     style={{
-                                      width: 34,
-                                      height: 34,
-                                      borderRadius: 12,
                                       display: "flex",
+                                      gap: 10,
                                       alignItems: "center",
-                                      justifyContent: "center",
-                                      fontWeight: 900,
-                                      color: "white",
-                                      background:
-                                        idx === 0 ? COLORS.green : COLORS.navy,
-                                      flexShrink: 0,
+                                      minWidth: 0,
                                     }}
                                   >
-                                    {idx + 1}
-                                  </div>
-
-                                  <div style={{ minWidth: 0 }}>
+                                    {/* ✅ TIE-AWARE place badge + ✅ green if paid */}
                                     <div
                                       style={{
+                                        width: 34,
+                                        height: 34,
+                                        borderRadius: 12,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
                                         fontWeight: 900,
-                                        color: COLORS.text,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
+                                        color: "white",
+                                        background: isPaid
+                                          ? COLORS.green
+                                          : COLORS.navy,
+                                        flexShrink: 0,
                                       }}
+                                      title={
+                                        isPaid
+                                          ? "Paid position"
+                                          : "Not paid (or payouts not posted)"
+                                      }
                                     >
-                                      {r.name}
-                                      {r.adj ? (
-                                        <span
-                                          style={{
-                                            fontSize: 12,
-                                            marginLeft: 8,
-                                            opacity: 0.75,
-                                          }}
-                                        >
-                                          (adj {r.adj > 0 ? "+" : ""}
-                                          {r.adj})
-                                        </span>
-                                      ) : null}
-                                      {finalized &&
-                                      hasPostedPayouts &&
-                                      r.payoutCents > 0 ? (
-                                        <span
-                                          style={{
-                                            fontSize: 12,
-                                            marginLeft: 10,
-                                            fontWeight: 900,
-                                            color: COLORS.green,
-                                          }}
-                                        >
-                                          ${fromCents(r.payoutCents)}
-                                        </span>
-                                      ) : null}
+                                      {place}
+                                    </div>
+
+                                    <div style={{ minWidth: 0 }}>
+                                      <div
+                                        style={{
+                                          fontWeight: 900,
+                                          color: COLORS.text,
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                          whiteSpace: "nowrap",
+                                        }}
+                                      >
+                                        {r.name}
+                                        {r.adj ? (
+                                          <span
+                                            style={{
+                                              fontSize: 12,
+                                              marginLeft: 8,
+                                              opacity: 0.75,
+                                            }}
+                                          >
+                                            (adj {r.adj > 0 ? "+" : ""}
+                                            {r.adj})
+                                          </span>
+                                        ) : null}
+                                        {/* ✅ show FULL dollars */}
+                                        {finalized &&
+                                        hasPostedPayouts &&
+                                        Number(r.payoutDollars || 0) > 0 ? (
+                                          <span
+                                            style={{
+                                              fontSize: 12,
+                                              marginLeft: 10,
+                                              fontWeight: 900,
+                                              color: COLORS.green,
+                                            }}
+                                          >
+                                            ${Number(r.payoutDollars || 0)}
+                                          </span>
+                                        ) : null}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
 
-                                <div
-                                  style={{
-                                    fontWeight: 900,
-                                    color: COLORS.navy,
-                                    whiteSpace: "nowrap",
-                                  }}
-                                >
-                                  {r.total} pts
+                                  <div
+                                    style={{
+                                      fontWeight: 900,
+                                      color: COLORS.navy,
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {r.total} pts
+                                  </div>
                                 </div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>
