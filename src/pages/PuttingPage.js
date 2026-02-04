@@ -98,6 +98,104 @@ function computeCardSizesNoOnes(n) {
   return result;
 }
 
+// ---------- Payout helpers ----------
+function toCents(dollars) {
+  const n = Number(dollars);
+  if (Number.isNaN(n)) return 0;
+  return Math.round(n * 100);
+}
+
+function fromCents(cents) {
+  return (Number(cents || 0) / 100).toFixed(2);
+}
+
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (Number.isNaN(x)) return min;
+  return Math.max(min, Math.min(max, Math.floor(x)));
+}
+
+function payoutPlacesForPoolSize(count) {
+  if (count > 7) return 3;
+  if (count >= 5) return 2;
+  if (count >= 2) return 1; // allow 2-4 -> 1 payout
+  if (count === 1) return 1;
+  return 0;
+}
+
+// Returns array of shares (sum to 1) for positions 1..N in "by-pool" mode
+function sharesByPoolMode(nPlaces) {
+  if (nPlaces >= 3) return [0.5, 0.3, 0.2];
+  if (nPlaces === 2) return [0.6, 0.4];
+  if (nPlaces === 1) return [1.0];
+  return [];
+}
+
+// Collective weights, ordered by priority: A1, A2, A3, B1, B2, C1 (strictly descending)
+const COLLECTIVE_BASE_WEIGHTS = [30, 20, 15, 14, 11, 10]; // sums 100
+
+function scaleWeightsTo100(weights) {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  if (!sum) return [];
+  return weights.map((w) => w / sum); // fractions summing to 1
+}
+
+// Tie-aware payout calculator for a single pool:
+// rows must be sorted desc by total: [{id,total,name}]
+function computeTieAwarePayoutsForPool(rowsSorted, positionShares, potCents) {
+  // positionShares: array where index 0 = position 1 share
+  const nPositions = positionShares.length;
+  if (!rowsSorted.length || nPositions === 0 || potCents <= 0) return {};
+
+  // Build tie groups
+  const groups = [];
+  for (const r of rowsSorted) {
+    const last = groups[groups.length - 1];
+    if (!last || last.total !== r.total)
+      groups.push({ total: r.total, members: [r] });
+    else last.members.push(r);
+  }
+
+  const payouts = {};
+  let pos = 1; // 1-based position counter
+
+  for (const g of groups) {
+    const groupSize = g.members.length;
+
+    // This tie group occupies positions pos..pos+groupSize-1
+    const start = pos;
+    const end = pos + groupSize - 1;
+
+    if (start > nPositions) break; // group starts after last paid position
+
+    // Determine which paid positions are covered by this group
+    const coveredStart = Math.max(start, 1);
+    const coveredEnd = Math.min(end, nPositions);
+
+    let coveredShare = 0;
+    for (let p = coveredStart; p <= coveredEnd; p++) {
+      coveredShare += positionShares[p - 1] || 0;
+    }
+
+    if (coveredShare > 0) {
+      const groupCents = Math.round(potCents * coveredShare);
+      const perMember = Math.floor(groupCents / groupSize);
+      // distribute remainder pennies
+      let rem = groupCents - perMember * groupSize;
+
+      g.members.forEach((m) => {
+        payouts[m.id] = (payouts[m.id] || 0) + perMember + (rem > 0 ? 1 : 0);
+        if (rem > 0) rem -= 1;
+      });
+    }
+
+    pos += groupSize;
+    if (pos > nPositions) break;
+  }
+
+  return payouts;
+}
+
 export default function PuttingPage() {
   // --- Palette / look (match Tags theme) ---
   const COLORS = {
@@ -141,22 +239,24 @@ export default function PuttingPage() {
   // Putting league stored data
   const [putting, setPutting] = useState({
     settings: {
-      stations: 1, // ✅ default now 1
+      stations: 1,
       rounds: 1,
       locked: false,
-      currentRound: 0, // 0 = not started, else 1..rounds
+      currentRound: 0,
       finalized: false,
       cardMode: "", // "" | "manual" | "random"
     },
-    players: [], // {id, name, pool: "A"|"B"|"C"}
-    cardsByRound: {}, // { "1":[{id,name,playerIds}], "2":[...] }
-    scores: {}, // scores[round][station][playerId] = 0..4 (missing = field absent)
-    submitted: {}, // submitted[round][cardId] = true
-    adjustments: {}, // ✅ leaderboard adjustments: { [playerId]: number }
+    players: [],
+    cardsByRound: {},
+    scores: {},
+    submitted: {},
+    adjustments: {},
+    payoutConfig: null, // ✅ { buyInDollars, leagueFeePct, mode: "pool"|"collective", updatedAt }
+    payoutsPosted: {}, // ✅ { [playerId]: cents }
   });
 
   // UI state
-  const [setupOpen, setSetupOpen] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false); // ✅ Admin Tools collapsed by default
   const [checkinOpen, setCheckinOpen] = useState(true);
   const [cardsOpen, setCardsOpen] = useState(true);
   const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
@@ -181,8 +281,8 @@ export default function PuttingPage() {
 
   // -------- Helpers (computed) --------
   const settings = putting.settings || {};
-  const stations = Math.max(1, Math.min(10, Number(settings.stations || 1))); // ✅ default 1
-  const totalRounds = Math.max(1, Math.min(5, Number(settings.rounds || 1))); // 1–5
+  const stations = Math.max(1, Math.min(10, Number(settings.stations || 1)));
+  const totalRounds = Math.max(1, Math.min(5, Number(settings.rounds || 1)));
   const currentRound = Number(settings.currentRound || 0);
   const finalized = !!settings.finalized;
   const cardMode = String(settings.cardMode || "");
@@ -201,6 +301,16 @@ export default function PuttingPage() {
   const adjustments =
     putting.adjustments && typeof putting.adjustments === "object"
       ? putting.adjustments
+      : {};
+
+  const payoutConfig =
+    putting.payoutConfig && typeof putting.payoutConfig === "object"
+      ? putting.payoutConfig
+      : null;
+
+  const payoutsPosted =
+    putting.payoutsPosted && typeof putting.payoutsPosted === "object"
+      ? putting.payoutsPosted
       : {};
 
   const roundStarted = settings.locked && currentRound >= 1;
@@ -319,7 +429,7 @@ export default function PuttingPage() {
           },
           puttingLeague: {
             settings: {
-              stations: 1, // ✅ default now 1
+              stations: 1,
               rounds: 1,
               locked: false,
               currentRound: 0,
@@ -331,6 +441,8 @@ export default function PuttingPage() {
             scores: {},
             submitted: {},
             adjustments: {},
+            payoutConfig: null,
+            payoutsPosted: {},
           },
         });
       }
@@ -351,12 +463,14 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
+          payoutConfig: null,
+          payoutsPosted: {},
         };
 
         const safe = {
           ...pl,
           settings: {
-            stations: 1, // ✅ default now 1
+            stations: 1,
             rounds: 1,
             locked: false,
             currentRound: 0,
@@ -367,6 +481,8 @@ export default function PuttingPage() {
           adjustments: {
             ...(pl.adjustments || {}),
           },
+          payoutConfig: pl.payoutConfig || null,
+          payoutsPosted: pl.payoutsPosted || {},
         };
 
         setPutting(safe);
@@ -713,7 +829,7 @@ export default function PuttingPage() {
   async function resetPuttingLeague() {
     await requireAdmin(async () => {
       const ok = window.confirm(
-        "Reset PUTTING league only?\n\nThis clears putting players, cards, scores, settings, and leaderboard adjustments.\n(Tag rounds will NOT be affected.)"
+        "Reset PUTTING league only?\n\nThis clears putting players, cards, scores, settings, leaderboard adjustments, and payout settings.\n(Tag rounds will NOT be affected.)"
       );
       if (!ok) return;
 
@@ -732,6 +848,8 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
+          payoutConfig: null,
+          payoutsPosted: {},
         },
       });
 
@@ -741,7 +859,7 @@ export default function PuttingPage() {
       setCardName("");
       setName("");
       setPool("A");
-      setSetupOpen(true);
+      setSetupOpen(false);
       setCheckinOpen(true);
       setCardsOpen(true);
       setLeaderboardsOpen(false);
@@ -760,7 +878,6 @@ export default function PuttingPage() {
     });
   }
 
-  // ✅ NOW REQUIRES ADMIN PASSWORD (but won’t reprompt if already unlocked)
   async function setFinalLeaderboardTotal(playerId, desiredFinalTotal) {
     if (finalized) return;
 
@@ -859,7 +976,16 @@ export default function PuttingPage() {
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
 
-      const row = { id: p.id, name: p.name, pool: p.pool, total, adj };
+      const payoutCents = Number(payoutsPosted?.[p.id] ?? 0) || 0;
+
+      const row = {
+        id: p.id,
+        name: p.name,
+        pool: p.pool,
+        total,
+        adj,
+        payoutCents,
+      };
       if (p.pool === "B") pools.B.push(row);
       else if (p.pool === "C") pools.C.push(row);
       else pools.A.push(row);
@@ -870,7 +996,221 @@ export default function PuttingPage() {
     });
 
     return pools;
-  }, [players, scores, stations, totalRounds, adjustments]);
+  }, [players, scores, stations, totalRounds, adjustments, payoutsPosted]);
+
+  // -------- Payout configuration + posting --------
+  async function configurePayouts() {
+    await requireAdmin(async () => {
+      // Buy-in
+      const buyInRaw = window.prompt(
+        "Player buy-in (in dollars):\n\nEnter a whole number from 1 to 20."
+      );
+      if (buyInRaw === null) return;
+      const buyInDollars = clampInt(buyInRaw, 1, 20);
+
+      // Fee percent
+      const feeRaw = window.prompt(
+        "Admin/League Fee (percentage):\n\nEnter a whole number from 1 to 50."
+      );
+      if (feeRaw === null) return;
+      const leagueFeePct = clampInt(feeRaw, 1, 50);
+
+      // Mode
+      const modeRaw = window.prompt(
+        'Payout Mode:\n\nType "pool" for Payouts by Pool\nor type "collective" for Collective Payouts'
+      );
+      if (modeRaw === null) return;
+      const m = String(modeRaw || "")
+        .trim()
+        .toLowerCase();
+      const mode =
+        m === "collective" ? "collective" : m === "pool" ? "pool" : "";
+
+      if (!mode) {
+        alert('Invalid mode. Type exactly "pool" or "collective".');
+        return;
+      }
+
+      await updatePutting({
+        payoutConfig: {
+          buyInDollars,
+          leagueFeePct,
+          mode,
+          updatedAt: Date.now(),
+        },
+        payoutsPosted: {}, // ✅ clear any previously posted payouts if config changes
+      });
+
+      alert(
+        `Payouts configured ✅\n\nBuy-in: $${buyInDollars}\nFee: ${leagueFeePct}%\nMode: ${
+          mode === "pool" ? "Payouts by Pool" : "Collective Payouts"
+        }`
+      );
+    });
+  }
+
+  function computeAllPayoutsCents() {
+    if (!payoutConfig)
+      return { ok: false, reason: "No payout configuration set." };
+
+    const buyIn = clampInt(payoutConfig.buyInDollars, 1, 20);
+    const feePct = clampInt(payoutConfig.leagueFeePct, 1, 50);
+    const mode = payoutConfig.mode;
+
+    if (!players.length) return { ok: false, reason: "No players checked in." };
+
+    const totalPotCents = toCents(buyIn) * players.length;
+    const feeCents = Math.round((totalPotCents * feePct) / 100);
+    const potAfterFeeCents = Math.max(0, totalPotCents - feeCents);
+
+    // Build sorted rows per pool (desc by total)
+    const pools = {
+      A: (leaderboardByPool.A || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+      B: (leaderboardByPool.B || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+      C: (leaderboardByPool.C || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+    };
+
+    const countA = pools.A.length;
+    const countB = pools.B.length;
+    const countC = pools.C.length;
+
+    if (mode === "pool") {
+      // Separate pot per pool
+      const payouts = {};
+
+      const poolPot = (poolCount) => {
+        const poolTotal = toCents(buyIn) * poolCount;
+        const poolFee = Math.round((poolTotal * feePct) / 100);
+        return Math.max(0, poolTotal - poolFee);
+      };
+
+      const doPool = (key) => {
+        const rows = pools[key];
+        const pot = poolPot(rows.length);
+        const places = payoutPlacesForPoolSize(rows.length);
+        const shares = sharesByPoolMode(places);
+        const poolPayouts = computeTieAwarePayoutsForPool(rows, shares, pot);
+        Object.entries(poolPayouts).forEach(([pid, cents]) => {
+          payouts[pid] = (payouts[pid] || 0) + cents;
+        });
+      };
+
+      if (countA) doPool("A");
+      if (countB) doPool("B");
+      if (countC) doPool("C");
+
+      return {
+        ok: true,
+        payouts,
+        meta: {
+          buyIn,
+          feePct,
+          mode,
+          totalPotCents,
+          feeCents,
+          potAfterFeeCents,
+        },
+      };
+    }
+
+    // Collective mode
+    // Determine paid places per pool (based on that pool's size)
+    const placesA = payoutPlacesForPoolSize(countA);
+    const placesB = payoutPlacesForPoolSize(countB);
+    const placesC = payoutPlacesForPoolSize(countC);
+
+    // Build slot list in required order: A1,A2,A3,B1,B2,C1 (only include if pool has that place)
+    const slots = [];
+    for (let i = 1; i <= Math.min(3, placesA); i++)
+      slots.push({ pool: "A", pos: i });
+    for (let i = 1; i <= Math.min(2, placesB); i++)
+      slots.push({ pool: "B", pos: i });
+    for (let i = 1; i <= Math.min(1, placesC); i++)
+      slots.push({ pool: "C", pos: i });
+
+    if (!slots.length) {
+      return { ok: false, reason: "No payout slots available." };
+    }
+
+    // Assign scaled weights to existing slots
+    const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
+    const slotShares = scaleWeightsTo100(base); // fractions summing to 1
+
+    // Convert slot shares into per-pool positionShares arrays
+    const perPoolShares = { A: [], B: [], C: [] };
+    slots.forEach((slot, idx) => {
+      perPoolShares[slot.pool][slot.pos - 1] =
+        (perPoolShares[slot.pool][slot.pos - 1] || 0) + slotShares[idx];
+    });
+
+    // Compute payouts per pool using those per-pool position shares
+    const payouts = {};
+    (["A", "B", "C"] || []).forEach((k) => {
+      const shares = perPoolShares[k].filter((x) => typeof x === "number");
+      if (!shares.length) return;
+      const poolPayouts = computeTieAwarePayoutsForPool(
+        pools[k],
+        shares,
+        potAfterFeeCents
+      );
+      Object.entries(poolPayouts).forEach(([pid, cents]) => {
+        payouts[pid] = (payouts[pid] || 0) + cents;
+      });
+    });
+
+    return {
+      ok: true,
+      payouts,
+      meta: {
+        buyIn,
+        feePct,
+        mode,
+        totalPotCents,
+        feeCents,
+        potAfterFeeCents,
+        collectiveWeightsUsed: base,
+      },
+    };
+  }
+
+  async function postPayoutsToLeaderboard() {
+    if (!finalized) return;
+    if (!payoutConfig) {
+      alert("Configure payouts first.");
+      return;
+    }
+
+    await requireAdmin(async () => {
+      const result = computeAllPayoutsCents();
+      if (!result.ok) {
+        alert(result.reason || "Unable to compute payouts.");
+        return;
+      }
+
+      const ok = window.confirm(
+        "Post payouts to the leaderboard?\n\nThis will write payout dollar amounts next to the winning players."
+      );
+      if (!ok) return;
+
+      await updatePutting({
+        payoutsPosted: result.payouts,
+      });
+
+      alert("Payouts posted ✅");
+    });
+  }
 
   // -------- UI gating --------
   const canBeginNextRound =
@@ -895,6 +1235,8 @@ export default function PuttingPage() {
 
   const showCardModeButtons =
     !roundStarted && !finalized && players.length >= 2;
+
+  const hasPostedPayouts = Object.keys(payoutsPosted || {}).length > 0;
 
   // -------- Render --------
   return (
@@ -1146,6 +1488,73 @@ export default function PuttingPage() {
                       ? "Close Leaderboard Edit"
                       : "Edit Leaderboard Scores"}
                   </button>
+
+                  {/* ✅ Configure Payouts (same style as Edit Leaderboard Scores) */}
+                  <button
+                    onClick={configurePayouts}
+                    style={{
+                      ...smallButtonStyle,
+                      width: "100%",
+                      background: "#fff",
+                      border: `1px solid ${COLORS.navy}`,
+                      color: COLORS.navy,
+                    }}
+                    disabled={players.length === 0}
+                    title="Requires admin password. Configure buy-in, fee, and payout mode."
+                  >
+                    Configure Payouts
+                  </button>
+
+                  {/* ✅ Post Payouts (red outline) */}
+                  <button
+                    onClick={postPayoutsToLeaderboard}
+                    style={{
+                      ...smallButtonStyle,
+                      width: "100%",
+                      background: "#fff",
+                      border: `2px solid ${COLORS.red}`,
+                      color: COLORS.red,
+                      fontWeight: 900,
+                    }}
+                    disabled={!finalized || !payoutConfig}
+                    title={
+                      !finalized
+                        ? "Only available after Finalize."
+                        : !payoutConfig
+                        ? "Configure payouts first."
+                        : "Requires admin password. Posts payout dollars to leaderboard."
+                    }
+                  >
+                    Post Payouts to Leaderboard
+                  </button>
+
+                  {/* Optional payout status line */}
+                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                    Payouts:{" "}
+                    <strong>
+                      {payoutConfig
+                        ? `$${payoutConfig.buyInDollars} buy-in • ${
+                            payoutConfig.leagueFeePct
+                          }% fee • ${
+                            payoutConfig.mode === "pool"
+                              ? "By Pool"
+                              : "Collective"
+                          }`
+                        : "Not configured"}
+                    </strong>
+                    {finalized ? (
+                      <span style={{ marginLeft: 8 }}>
+                        • Posted:{" "}
+                        <strong
+                          style={{
+                            color: hasPostedPayouts ? COLORS.green : COLORS.red,
+                          }}
+                        >
+                          {hasPostedPayouts ? "Yes" : "No"}
+                        </strong>
+                      </span>
+                    ) : null}
+                  </div>
 
                   {adjustOpen && !finalized && (
                     <div
@@ -2136,6 +2545,7 @@ export default function PuttingPage() {
                                     display: "flex",
                                     gap: 10,
                                     alignItems: "center",
+                                    minWidth: 0,
                                   }}
                                 >
                                   <div
@@ -2156,25 +2566,44 @@ export default function PuttingPage() {
                                     {idx + 1}
                                   </div>
 
-                                  <div
-                                    style={{
-                                      fontWeight: 900,
-                                      color: COLORS.text,
-                                    }}
-                                  >
-                                    {r.name}
-                                    {r.adj ? (
-                                      <span
-                                        style={{
-                                          fontSize: 12,
-                                          marginLeft: 8,
-                                          opacity: 0.75,
-                                        }}
-                                      >
-                                        (adj {r.adj > 0 ? "+" : ""}
-                                        {r.adj})
-                                      </span>
-                                    ) : null}
+                                  <div style={{ minWidth: 0 }}>
+                                    <div
+                                      style={{
+                                        fontWeight: 900,
+                                        color: COLORS.text,
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      {r.name}
+                                      {r.adj ? (
+                                        <span
+                                          style={{
+                                            fontSize: 12,
+                                            marginLeft: 8,
+                                            opacity: 0.75,
+                                          }}
+                                        >
+                                          (adj {r.adj > 0 ? "+" : ""}
+                                          {r.adj})
+                                        </span>
+                                      ) : null}
+                                      {finalized &&
+                                      hasPostedPayouts &&
+                                      r.payoutCents > 0 ? (
+                                        <span
+                                          style={{
+                                            fontSize: 12,
+                                            marginLeft: 10,
+                                            fontWeight: 900,
+                                            color: COLORS.green,
+                                          }}
+                                        >
+                                          ${fromCents(r.payoutCents)}
+                                        </span>
+                                      ) : null}
+                                    </div>
                                   </div>
                                 </div>
 
@@ -2182,6 +2611,7 @@ export default function PuttingPage() {
                                   style={{
                                     fontWeight: 900,
                                     color: COLORS.navy,
+                                    whiteSpace: "nowrap",
                                   }}
                                 >
                                   {r.total} pts

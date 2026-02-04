@@ -71,7 +71,10 @@ export default function DoublesPage() {
 
   // ✅ TEAM scoring (not card scoring)
   const [scoreDraftByTeam, setScoreDraftByTeam] = useState({}); // teamId -> score
-  const [submitMsgByTeam, setSubmitMsgByTeam] = useState({}); // teamId -> string
+
+  // ✅ Single submit button per card feedback
+  const [submitMsgByCard, setSubmitMsgByCard] = useState({}); // cardId -> string
+  const [submitMsgColorByCard, setSubmitMsgColorByCard] = useState({}); // cardId -> color
 
   // Admin: edit holes
   const [editHolesOpen, setEditHolesOpen] = useState(false);
@@ -97,14 +100,14 @@ export default function DoublesPage() {
         teammateId: "",
       },
       cards: [], // [{id, startHole, teams:[{id,type:"doubles"|"cali", players:[{id,name,pool}]}]}]
-      submissions: {}, // ✅ teamId -> {submittedAt, score, label}
+      submissions: {}, // ✅ teamId -> {submittedAt, score, label, playersText, teamName}
       leaderboard: [], // [{teamId, teamName, playersText, score}]
       updatedAt: Date.now(),
     }),
     []
   );
 
-  // Small helper for admin-only actions (password on click)
+  // Admin-only helper: password on click
   async function requireAdmin(fn) {
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
@@ -147,7 +150,7 @@ export default function DoublesPage() {
       () => setLoading(false)
     );
     return () => unsub();
-  }, [leagueRef, defaultDoubles]);
+  }, [leagueRef, defaultDoubles, lateCardId]);
 
   const isSeated = (doubles?.format || "random") === "seated";
   const started = !!doubles?.started;
@@ -367,7 +370,7 @@ export default function DoublesPage() {
     return names.join(", ");
   }
 
-  // ✅ Start round (Make Teams & Cards) moved to Today's Format bottom
+  // ✅ Start round (Make Teams & Cards) at bottom of Today's Format
   async function handleStartRound() {
     setStartRoundMsg("");
     setStartRoundMsgColor(COLORS.muted);
@@ -404,7 +407,7 @@ export default function DoublesPage() {
           "doubles.layoutNote": layoutNote || "",
           "doubles.cali": built.cali,
           "doubles.cards": built.cardsOut,
-          "doubles.submissions": {}, // ✅ team submissions reset
+          "doubles.submissions": {}, // reset submissions
           "doubles.leaderboard": [],
           "doubles.updatedAt": Date.now(),
         });
@@ -431,7 +434,8 @@ export default function DoublesPage() {
 
       setExpandedCardId(null);
       setScoreDraftByTeam({});
-      setSubmitMsgByTeam({});
+      setSubmitMsgByCard({});
+      setSubmitMsgColorByCard({});
       setHoleEdits({});
       setLateMsg("");
       setLateName("");
@@ -442,61 +446,74 @@ export default function DoublesPage() {
     });
   }
 
-  function allTeamsFlat(cardsList) {
-    const out = [];
-    for (const c of cardsList) {
-      for (const t of c.teams || []) out.push(t);
-    }
-    return out;
-  }
+  // ✅ Submit ALL team scores for a card with a single button
+  async function submitCardScores(cardId) {
+    const card = cards.find((c) => c.id === cardId);
+    if (!card) return;
 
-  // ✅ submit score PER TEAM
-  async function submitTeamScore(teamId) {
-    const n = Number(scoreDraftByTeam[teamId] ?? 0);
-    const score = clamp(isNaN(n) ? 0 : n, -18, 18);
+    // reset message
+    setSubmitMsgByCard((m) => ({ ...m, [cardId]: "" }));
+    setSubmitMsgColorByCard((m) => ({ ...m, [cardId]: COLORS.muted }));
 
-    // find the team
-    const teams = allTeamsFlat(cards);
-    const team = teams.find((t) => t.id === teamId);
-    if (!team) return;
+    const missing = [];
+    const nextSubmissions = { ...submissions };
 
-    const playersText = teamPlayersText(team);
-    const teamName = team.type === "cali" ? "Cali" : "Team";
+    for (const t of card.teams || []) {
+      const raw = scoreDraftByTeam[t.id];
 
-    // merge into existing submissions map
-    const newSubmissions = {
-      ...submissions,
-      [teamId]: {
+      // allow 0; disallow empty
+      if (raw === "" || raw === null || raw === undefined) {
+        missing.push(teamDisplay(t));
+        continue;
+      }
+
+      const n = Number(raw);
+      const score = clamp(isNaN(n) ? 0 : n, -18, 18);
+
+      nextSubmissions[t.id] = {
         submittedAt: Date.now(),
         score,
         label: scoreLabel(score),
-        playersText,
-        teamName,
-      },
-    };
+        playersText: teamPlayersText(t),
+        teamName: t.type === "cali" ? "Cali" : "Team",
+        cardId,
+      };
+    }
 
-    // rebuild leaderboard from submissions
-    const lb = Object.entries(newSubmissions).map(([id, s]) => ({
+    if (missing.length) {
+      setSubmitMsgColorByCard((m) => ({ ...m, [cardId]: COLORS.red }));
+      setSubmitMsgByCard((m) => ({
+        ...m,
+        [cardId]:
+          "Missing scores for: " + missing.join(", ") + ". (0 is allowed.)",
+      }));
+      return;
+    }
+
+    // rebuild leaderboard from ALL submissions
+    const lb = Object.entries(nextSubmissions).map(([id, s]) => ({
       teamId: id,
       teamName: s.teamName || "Team",
       playersText: s.playersText || "",
       score: Number(s.score ?? 0),
     }));
-
     lb.sort((a, b) => a.score - b.score);
 
     await updateDoc(leagueRef, {
-      "doubles.submissions": newSubmissions,
+      "doubles.submissions": nextSubmissions,
       "doubles.leaderboard": lb,
       "doubles.updatedAt": Date.now(),
     });
 
-    setSubmitMsgByTeam((m) => ({
+    setSubmitMsgColorByCard((m) => ({ ...m, [cardId]: COLORS.green }));
+    setSubmitMsgByCard((m) => ({
       ...m,
-      [teamId]: `Submitted! Score: ${scoreLabel(score)}.`,
+      [cardId]: "✅ Card scores submitted.",
     }));
+
+    // auto-clear after a moment
     setTimeout(() => {
-      setSubmitMsgByTeam((m) => ({ ...m, [teamId]: "" }));
+      setSubmitMsgByCard((m) => ({ ...m, [cardId]: "" }));
     }, 2500);
   }
 
@@ -717,7 +734,7 @@ export default function DoublesPage() {
                 </div>
               </div>
 
-              {/* ✅ Make Teams & Cards moved HERE (bottom of Today's Format) */}
+              {/* ✅ Start Round button here */}
               {!started && (
                 <div style={{ display: "grid", gap: 10 }}>
                   <button
@@ -853,7 +870,6 @@ export default function DoublesPage() {
               {cards.map((c, idx) => {
                 const isOpen = expandedCardId === c.id;
 
-                // card summary: how many teams submitted on this card?
                 const teamIds = (c.teams || []).map((t) => t.id);
                 const submittedCount = teamIds.filter(
                   (id) => !!submissions[id]
@@ -961,7 +977,7 @@ export default function DoublesPage() {
                                   </div>
                                 </div>
 
-                                {/* ✅ Team score input + submit */}
+                                {/* ✅ Team score input (no per-team submit button) */}
                                 <div
                                   style={{
                                     marginTop: 10,
@@ -992,27 +1008,41 @@ export default function DoublesPage() {
                                     }
                                     placeholder="ex: -2, 0, +4"
                                   />
-                                  <button
-                                    style={button(true)}
-                                    onClick={() => submitTeamScore(t.id)}
-                                  >
-                                    Submit Team Score
-                                  </button>
-
-                                  {!!submitMsgByTeam[t.id] && (
-                                    <div
-                                      style={{
-                                        fontWeight: 900,
-                                        color: COLORS.green,
-                                      }}
-                                    >
-                                      {submitMsgByTeam[t.id]}
-                                    </div>
-                                  )}
                                 </div>
                               </div>
                             );
                           })}
+                        </div>
+
+                        {/* ✅ SINGLE submit button for the whole card */}
+                        <div
+                          style={{ marginTop: 12, display: "grid", gap: 10 }}
+                        >
+                          <button
+                            style={{
+                              padding: "14px 18px",
+                              borderRadius: 14,
+                              border: `2px solid ${COLORS.navy}`,
+                              background: COLORS.orange,
+                              fontWeight: 1000,
+                              cursor: "pointer",
+                            }}
+                            onClick={() => submitCardScores(c.id)}
+                          >
+                            Submit Card Scores
+                          </button>
+
+                          {!!submitMsgByCard[c.id] && (
+                            <div
+                              style={{
+                                fontWeight: 900,
+                                color:
+                                  submitMsgColorByCard[c.id] || COLORS.muted,
+                              }}
+                            >
+                              {submitMsgByCard[c.id]}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -1093,9 +1123,13 @@ export default function DoublesPage() {
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
                       style={{
-                        ...button(formatChoice === "seated"),
+                        padding: "12px 14px",
+                        borderRadius: 12,
+                        border: `2px solid ${COLORS.navy}`,
                         background:
                           formatChoice === "seated" ? COLORS.orange : "#fff",
+                        fontWeight: 900,
+                        cursor: "pointer",
                         flex: 1,
                         minWidth: 220,
                       }}
@@ -1105,9 +1139,13 @@ export default function DoublesPage() {
                     </button>
                     <button
                       style={{
-                        ...button(formatChoice === "random"),
+                        padding: "12px 14px",
+                        borderRadius: 12,
+                        border: `2px solid ${COLORS.navy}`,
                         background:
                           formatChoice === "random" ? COLORS.orange : "#fff",
+                        fontWeight: 900,
+                        cursor: "pointer",
                         flex: 1,
                         minWidth: 220,
                       }}
@@ -1120,9 +1158,13 @@ export default function DoublesPage() {
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <button
                       style={{
-                        ...button(caliMode === "random"),
+                        padding: "12px 14px",
+                        borderRadius: 12,
+                        border: `2px solid ${COLORS.navy}`,
                         background:
                           caliMode === "random" ? COLORS.orange : "#fff",
+                        fontWeight: 900,
+                        cursor: "pointer",
                         flex: 1,
                         minWidth: 220,
                       }}
@@ -1132,9 +1174,13 @@ export default function DoublesPage() {
                     </button>
                     <button
                       style={{
-                        ...button(caliMode === "manual"),
+                        padding: "12px 14px",
+                        borderRadius: 12,
+                        border: `2px solid ${COLORS.navy}`,
                         background:
                           caliMode === "manual" ? COLORS.orange : "#fff",
+                        fontWeight: 900,
+                        cursor: "pointer",
                         flex: 1,
                         minWidth: 220,
                       }}
@@ -1214,26 +1260,18 @@ export default function DoublesPage() {
                       </div>
                     )}
 
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: COLORS.muted }}>
-                        If there’s an unpaired Cali already on a card, the late
-                        player becomes their teammate. Otherwise, the late
-                        player is added as a Cali on the selected card.
-                      </div>
-
-                      <select
-                        style={input}
-                        value={lateCardId}
-                        onChange={(e) => setLateCardId(e.target.value)}
-                      >
-                        <option value="">Select card…</option>
-                        {cards.map((c, i) => (
-                          <option key={c.id} value={c.id}>
-                            Card {i + 1} (Start Hole {c.startHole})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      style={input}
+                      value={lateCardId}
+                      onChange={(e) => setLateCardId(e.target.value)}
+                    >
+                      <option value="">Select card…</option>
+                      {cards.map((c, i) => (
+                        <option key={c.id} value={c.id}>
+                          Card {i + 1} (Start Hole {c.startHole})
+                        </option>
+                      ))}
+                    </select>
 
                     <button style={button(true)} onClick={addLatePlayer}>
                       Add Late Player (Admin)
