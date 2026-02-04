@@ -1,3 +1,4 @@
+// src/pages/PuttingPage.js
 import React, { useEffect, useMemo, useState } from "react";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
@@ -261,6 +262,9 @@ export default function PuttingPage() {
   const [cardsOpen, setCardsOpen] = useState(true);
   const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
 
+  // ✅ NEW: Payout config panel open/closed
+  const [payoutsOpen, setPayoutsOpen] = useState(false);
+
   // Admin adjustment editor UI
   const [adjustOpen, setAdjustOpen] = useState(false);
 
@@ -331,6 +335,7 @@ export default function PuttingPage() {
     if (roundStarted) {
       setCheckinOpen(false);
       setSetupOpen(false);
+      setPayoutsOpen(false);
     }
   }, [roundStarted]);
 
@@ -749,6 +754,7 @@ export default function PuttingPage() {
       setSetupOpen(false);
       setCheckinOpen(false);
       setCardsOpen(true);
+      setPayoutsOpen(false);
       window.scrollTo(0, 0);
     });
   }
@@ -822,6 +828,7 @@ export default function PuttingPage() {
     });
 
     setAdjustOpen(false);
+    setPayoutsOpen(false);
     alert("Scores finalized. Leaderboards are now locked.");
   }
 
@@ -864,6 +871,7 @@ export default function PuttingPage() {
       setCardsOpen(true);
       setLeaderboardsOpen(false);
       setAdjustOpen(false);
+      setPayoutsOpen(false);
     });
   }
 
@@ -998,57 +1006,7 @@ export default function PuttingPage() {
     return pools;
   }, [players, scores, stations, totalRounds, adjustments, payoutsPosted]);
 
-  // -------- Payout configuration + posting --------
-  async function configurePayouts() {
-    await requireAdmin(async () => {
-      // Buy-in
-      const buyInRaw = window.prompt(
-        "Player buy-in (in dollars):\n\nEnter a whole number from 1 to 20."
-      );
-      if (buyInRaw === null) return;
-      const buyInDollars = clampInt(buyInRaw, 1, 20);
-
-      // Fee percent
-      const feeRaw = window.prompt(
-        "Admin/League Fee (percentage):\n\nEnter a whole number from 1 to 50."
-      );
-      if (feeRaw === null) return;
-      const leagueFeePct = clampInt(feeRaw, 1, 50);
-
-      // Mode
-      const modeRaw = window.prompt(
-        'Payout Mode:\n\nType "pool" for Payouts by Pool\nor type "collective" for Collective Payouts'
-      );
-      if (modeRaw === null) return;
-      const m = String(modeRaw || "")
-        .trim()
-        .toLowerCase();
-      const mode =
-        m === "collective" ? "collective" : m === "pool" ? "pool" : "";
-
-      if (!mode) {
-        alert('Invalid mode. Type exactly "pool" or "collective".');
-        return;
-      }
-
-      await updatePutting({
-        payoutConfig: {
-          buyInDollars,
-          leagueFeePct,
-          mode,
-          updatedAt: Date.now(),
-        },
-        payoutsPosted: {}, // ✅ clear any previously posted payouts if config changes
-      });
-
-      alert(
-        `Payouts configured ✅\n\nBuy-in: $${buyInDollars}\nFee: ${leagueFeePct}%\nMode: ${
-          mode === "pool" ? "Payouts by Pool" : "Collective Payouts"
-        }`
-      );
-    });
-  }
-
+  // -------- Payout computation + posting --------
   function computeAllPayoutsCents() {
     if (!payoutConfig)
       return { ok: false, reason: "No payout configuration set." };
@@ -1489,9 +1447,13 @@ export default function PuttingPage() {
                       : "Edit Leaderboard Scores"}
                   </button>
 
-                  {/* ✅ Configure Payouts (same style as Edit Leaderboard Scores) */}
+                  {/* ✅ Configure Payouts (NOW: password-gated toggle, inline panel) */}
                   <button
-                    onClick={configurePayouts}
+                    onClick={() =>
+                      requireAdmin(() => {
+                        setPayoutsOpen((v) => !v);
+                      })
+                    }
                     style={{
                       ...smallButtonStyle,
                       width: "100%",
@@ -1500,10 +1462,174 @@ export default function PuttingPage() {
                       color: COLORS.navy,
                     }}
                     disabled={players.length === 0}
-                    title="Requires admin password. Configure buy-in, fee, and payout mode."
+                    title="Requires admin password. Toggle payout configuration panel."
                   >
-                    Configure Payouts
+                    {payoutsOpen
+                      ? "Close Payout Configuration"
+                      : "Configure Payouts"}
                   </button>
+
+                  {/* ✅ Inline payout configuration panel */}
+                  {payoutsOpen && (
+                    <div
+                      style={{
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: 12,
+                        background: "#fff",
+                        padding: 12,
+                        marginTop: 0,
+                        display: "grid",
+                        gap: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                        }}
+                      >
+                        Payout Configuration
+                      </div>
+
+                      <label
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          textAlign: "left",
+                        }}
+                      >
+                        Buy-In ($)
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={payoutConfig?.buyInDollars ?? ""}
+                          onChange={(e) =>
+                            updatePuttingDot(
+                              "payoutConfig.buyInDollars",
+                              clampInt(e.target.value, 1, 20)
+                            )
+                          }
+                          style={{ ...inputStyle, width: "100%", marginTop: 6 }}
+                        />
+                      </label>
+
+                      <label
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          textAlign: "left",
+                        }}
+                      >
+                        League Fee (%)
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={payoutConfig?.leagueFeePct ?? ""}
+                          onChange={(e) =>
+                            updatePuttingDot(
+                              "payoutConfig.leagueFeePct",
+                              clampInt(e.target.value, 1, 50)
+                            )
+                          }
+                          style={{ ...inputStyle, width: "100%", marginTop: 6 }}
+                        />
+                      </label>
+
+                      <label
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          textAlign: "left",
+                        }}
+                      >
+                        Payout Mode
+                        <select
+                          value={payoutConfig?.mode ?? ""}
+                          onChange={(e) =>
+                            updatePuttingDot(
+                              "payoutConfig.mode",
+                              e.target.value
+                            )
+                          }
+                          style={{
+                            ...inputStyle,
+                            width: "100%",
+                            background: "#fff",
+                            marginTop: 6,
+                          }}
+                        >
+                          <option value="">Select mode…</option>
+                          <option value="pool">By Pool</option>
+                          <option value="collective">Collective</option>
+                        </select>
+                      </label>
+
+                      <button
+                        onClick={() =>
+                          requireAdmin(async () => {
+                            const buyInOk = clampInt(
+                              payoutConfig?.buyInDollars,
+                              1,
+                              20
+                            );
+                            const feeOk = clampInt(
+                              payoutConfig?.leagueFeePct,
+                              1,
+                              50
+                            );
+                            const modeOk =
+                              payoutConfig?.mode === "pool" ||
+                              payoutConfig?.mode === "collective"
+                                ? payoutConfig.mode
+                                : "";
+
+                            if (!modeOk) {
+                              alert(
+                                'Select a payout mode ("By Pool" or "Collective").'
+                              );
+                              return;
+                            }
+
+                            await updatePutting({
+                              payoutConfig: {
+                                buyInDollars: buyInOk,
+                                leagueFeePct: feeOk,
+                                mode: modeOk,
+                                updatedAt: Date.now(),
+                              },
+                              payoutsPosted: {}, // clear any previously posted payouts if config changes
+                            });
+
+                            setPayoutsOpen(false);
+                            alert("Payouts saved ✅");
+                          })
+                        }
+                        style={{
+                          ...buttonStyle,
+                          background: COLORS.green,
+                          color: "white",
+                          border: `1px solid ${COLORS.green}`,
+                          width: "100%",
+                        }}
+                      >
+                        Save Payout Configuration
+                      </button>
+
+                      <div
+                        style={{
+                          fontSize: 12,
+                          opacity: 0.75,
+                          textAlign: "left",
+                        }}
+                      >
+                        Tip: This clears previously posted payouts (if any) so
+                        you don’t accidentally post old numbers.
+                      </div>
+                    </div>
+                  )}
 
                   {/* ✅ Post Payouts (red outline) */}
                   <button
