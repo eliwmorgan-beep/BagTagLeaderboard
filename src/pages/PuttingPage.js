@@ -13,7 +13,14 @@ import {
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.5.1";
+const APP_VERSION = "v1.7";
+
+const DEFAULT_PAYOUT_CONFIG = {
+  buyInDollars: 5,
+  leagueFeePct: 10,
+  mode: "pool", // "pool" | "collective"
+  updatedAt: null,
+};
 
 function uid() {
   return Math.random().toString(36).substring(2, 10);
@@ -252,7 +259,8 @@ export default function PuttingPage() {
     scores: {},
     submitted: {},
     adjustments: {},
-    payoutConfig: null, // ✅ { buyInDollars, leagueFeePct, mode: "pool"|"collective", updatedAt }
+    // ✅ CHANGED: never null (prevents Firestore dot-path failures)
+    payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
     payoutsPosted: {}, // ✅ { [playerId]: cents }
   });
 
@@ -262,7 +270,7 @@ export default function PuttingPage() {
   const [cardsOpen, setCardsOpen] = useState(true);
   const [leaderboardsOpen, setLeaderboardsOpen] = useState(false);
 
-  // ✅ NEW: Payout config panel open/closed
+  // ✅ Payout config panel open/closed
   const [payoutsOpen, setPayoutsOpen] = useState(false);
 
   // Admin adjustment editor UI
@@ -307,10 +315,14 @@ export default function PuttingPage() {
       ? putting.adjustments
       : {};
 
+  // ✅ CHANGED: always provide an object fallback (never null)
   const payoutConfig =
     putting.payoutConfig && typeof putting.payoutConfig === "object"
-      ? putting.payoutConfig
-      : null;
+      ? {
+          ...DEFAULT_PAYOUT_CONFIG,
+          ...putting.payoutConfig,
+        }
+      : { ...DEFAULT_PAYOUT_CONFIG };
 
   const payoutsPosted =
     putting.payoutsPosted && typeof putting.payoutsPosted === "object"
@@ -446,7 +458,8 @@ export default function PuttingPage() {
             scores: {},
             submitted: {},
             adjustments: {},
-            payoutConfig: null,
+            // ✅ CHANGED: never null
+            payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
             payoutsPosted: {},
           },
         });
@@ -468,7 +481,8 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
-          payoutConfig: null,
+          // ✅ CHANGED: never null
+          payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
           payoutsPosted: {},
         };
 
@@ -486,8 +500,15 @@ export default function PuttingPage() {
           adjustments: {
             ...(pl.adjustments || {}),
           },
-          payoutConfig: pl.payoutConfig || null,
-          payoutsPosted: pl.payoutsPosted || {},
+          // ✅ CHANGED: ensure object fallback (never null)
+          payoutConfig:
+            pl.payoutConfig && typeof pl.payoutConfig === "object"
+              ? { ...DEFAULT_PAYOUT_CONFIG, ...pl.payoutConfig }
+              : { ...DEFAULT_PAYOUT_CONFIG },
+          payoutsPosted:
+            pl.payoutsPosted && typeof pl.payoutsPosted === "object"
+              ? pl.payoutsPosted
+              : {},
         };
 
         setPutting(safe);
@@ -855,7 +876,8 @@ export default function PuttingPage() {
           scores: {},
           submitted: {},
           adjustments: {},
-          payoutConfig: null,
+          // ✅ CHANGED: never null
+          payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
           payoutsPosted: {},
         },
       });
@@ -1115,7 +1137,7 @@ export default function PuttingPage() {
 
     // Compute payouts per pool using those per-pool position shares
     const payouts = {};
-    (["A", "B", "C"] || []).forEach((k) => {
+    ["A", "B", "C"].forEach((k) => {
       const shares = perPoolShares[k].filter((x) => typeof x === "number");
       if (!shares.length) return;
       const poolPayouts = computeTieAwarePayoutsForPool(
@@ -1145,10 +1167,6 @@ export default function PuttingPage() {
 
   async function postPayoutsToLeaderboard() {
     if (!finalized) return;
-    if (!payoutConfig) {
-      alert("Configure payouts first.");
-      return;
-    }
 
     await requireAdmin(async () => {
       const result = computeAllPayoutsCents();
@@ -1450,7 +1468,17 @@ export default function PuttingPage() {
                   {/* ✅ Configure Payouts (NOW: password-gated toggle, inline panel) */}
                   <button
                     onClick={() =>
-                      requireAdmin(() => {
+                      requireAdmin(async () => {
+                        // ✅ safety net: if somehow missing, create it
+                        if (
+                          !putting.payoutConfig ||
+                          typeof putting.payoutConfig !== "object"
+                        ) {
+                          await updatePutting({
+                            payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
+                            payoutsPosted: {},
+                          });
+                        }
                         setPayoutsOpen((v) => !v);
                       })
                     }
@@ -2362,7 +2390,10 @@ export default function PuttingPage() {
 
                                 {open && (
                                   <div
-                                    style={{ padding: 12, background: "#fff" }}
+                                    style={{
+                                      padding: 12,
+                                      background: "#fff",
+                                    }}
                                   >
                                     <div
                                       style={{
