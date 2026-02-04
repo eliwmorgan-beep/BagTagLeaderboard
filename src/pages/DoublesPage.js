@@ -2,10 +2,17 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
-import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
+import {
+  doc,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+  deleteField,
+} from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
+const APP_VERSION = "doubles-v1.5.0";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -29,6 +36,221 @@ function scoreLabel(n) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+// ----------------- Payout helpers (Team payouts) -----------------
+const DEFAULT_PAYOUT_CONFIG = {
+  buyInDollars: 5, // per PLAYER buy-in (pot uses total players checked in)
+  leagueFeePct: 10,
+  updatedAt: null,
+};
+
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (Number.isNaN(x)) return min;
+  return Math.max(min, Math.min(max, Math.floor(x)));
+}
+
+function toCents(dollars) {
+  const n = Number(dollars);
+  if (Number.isNaN(n)) return 0;
+  return Math.round(n * 100);
+}
+
+function fromCents(cents) {
+  return (Number(cents || 0) / 100).toFixed(2);
+}
+
+function payoutPlacesForTeamCount(teamCount) {
+  // same spirit as Putting:
+  // 2-4 teams => 1 paid place
+  // 5-7 teams => 2 paid places
+  // 8+ teams  => 3 paid places
+  if (teamCount > 7) return 3;
+  if (teamCount >= 5) return 2;
+  if (teamCount >= 2) return 1;
+  if (teamCount === 1) return 1;
+  return 0;
+}
+
+function sharesByPlaces(nPlaces) {
+  if (nPlaces >= 3) return [0.5, 0.3, 0.2];
+  if (nPlaces === 2) return [0.6, 0.4];
+  if (nPlaces === 1) return [1.0];
+  return [];
+}
+
+/**
+ * Whole-dollar allocation by shares:
+ * - uses whole dollars only
+ * - never exceeds potDollars
+ * - sums to potDollars (when potDollars > 0)
+ */
+function allocateWholeDollarsByShares(positionShares, potCents) {
+  const n = positionShares.length;
+  if (!n || potCents <= 0) return [];
+
+  const potDollars = Math.floor(potCents / 100);
+  if (potDollars <= 0) return new Array(n).fill(0);
+
+  const ideal = positionShares.map((s) => potDollars * (Number(s) || 0));
+  const floors = ideal.map((x) => Math.floor(x));
+  let used = floors.reduce((a, b) => a + b, 0);
+
+  if (used > potDollars) {
+    const fracAsc = ideal
+      .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+      .sort((a, b) => a.frac - b.frac);
+
+    let over = used - potDollars;
+    const out = [...floors];
+    for (const f of fracAsc) {
+      if (over <= 0) break;
+      if (out[f.i] > 0) {
+        out[f.i] -= 1;
+        over -= 1;
+      }
+    }
+    return out;
+  }
+
+  const fracDesc = ideal
+    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+    .sort((a, b) => b.frac - a.frac);
+
+  const out = [...floors];
+  let remaining = potDollars - used;
+  let idx = 0;
+
+  while (remaining > 0 && idx < 100000) {
+    const pick = fracDesc[idx % fracDesc.length];
+    out[pick.i] += 1;
+    remaining -= 1;
+    idx += 1;
+  }
+
+  const sumOut = out.reduce((a, b) => a + b, 0);
+  if (sumOut > potDollars) {
+    let over = sumOut - potDollars;
+    for (let i = out.length - 1; i >= 0 && over > 0; i--) {
+      const take = Math.min(out[i], over);
+      out[i] -= take;
+      over -= take;
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Tie-aware payout distribution for TEAMS:
+ * rowsSorted should be sorted by score ASC (lower is better):
+ *   [{ teamId, score }]
+ * positionShares: for positions 1..N
+ * Returns: { [teamId]: cents } (whole-dollar cents)
+ *
+ * Tie logic: a tie group shares the combined dollars of the positions it spans,
+ * split evenly (extra $1 remainders distributed within the group).
+ */
+function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
+  const nPositions = positionShares.length;
+  if (!rowsSorted.length || nPositions === 0 || potCents <= 0) return {};
+
+  const posDollars = allocateWholeDollarsByShares(positionShares, potCents);
+  const payouts = {};
+
+  // tie groups by identical score
+  const groups = [];
+  for (const r of rowsSorted) {
+    const last = groups[groups.length - 1];
+    if (!last || last.score !== r.score)
+      groups.push({ score: r.score, members: [r] });
+    else last.members.push(r);
+  }
+
+  let pos = 1; // 1-based
+  for (const g of groups) {
+    const groupSize = g.members.length;
+    const start = pos;
+    const end = pos + groupSize - 1;
+
+    if (start > nPositions) break;
+
+    const coveredStart = Math.max(start, 1);
+    const coveredEnd = Math.min(end, nPositions);
+
+    let groupDollars = 0;
+    for (let p = coveredStart; p <= coveredEnd; p++) {
+      groupDollars += posDollars[p - 1] || 0;
+    }
+
+    if (groupDollars > 0) {
+      const per = Math.floor(groupDollars / groupSize);
+      let rem = groupDollars - per * groupSize;
+
+      g.members.forEach((m) => {
+        const add = per + (rem > 0 ? 1 : 0);
+        if (rem > 0) rem -= 1;
+        payouts[m.teamId] = (payouts[m.teamId] || 0) + add * 100;
+      });
+    }
+
+    pos += groupSize;
+    if (pos > nPositions) break;
+  }
+
+  // Safety clamp (should not exceed whole-dollar pot)
+  const totalPaidCents = Object.values(payouts).reduce(
+    (a, b) => a + (Number(b) || 0),
+    0
+  );
+  const maxCents = Math.floor(potCents / 100) * 100;
+  if (totalPaidCents > maxCents) {
+    const entries = Object.entries(payouts).sort(
+      (a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0)
+    );
+    let over = totalPaidCents - maxCents;
+    for (let i = entries.length - 1; i >= 0 && over > 0; i--) {
+      const [tid, cents] = entries[i];
+      const take = Math.min(Number(cents) || 0, over);
+      payouts[tid] = (Number(cents) || 0) - take;
+      over -= take;
+    }
+  }
+
+  return payouts;
+}
+
+/**
+ * Tie-aware placements for leaderboard display.
+ * rowsSorted must already be sorted by score ASC (lower is better).
+ * Competition ranking:
+ *  - 1st, then (if tie for 2nd across many) all show 2, next distinct score shows index+1.
+ */
+function computeTiePlacesAsc(rowsSorted) {
+  const places = {};
+  let lastScore = null;
+  let lastPlace = 0;
+
+  for (let i = 0; i < rowsSorted.length; i++) {
+    const r = rowsSorted[i];
+    if (lastScore === null) {
+      lastScore = r.score;
+      lastPlace = 1;
+      places[r.teamId] = 1;
+      continue;
+    }
+
+    if (r.score === lastScore) {
+      places[r.teamId] = lastPlace;
+    } else {
+      lastScore = r.score;
+      lastPlace = i + 1;
+      places[r.teamId] = lastPlace;
+    }
+  }
+  return places;
+}
+
+// ----------------- Page -----------------
 export default function DoublesPage() {
   const COLORS = {
     blueLight: "#e6f3ff",
@@ -39,6 +261,7 @@ export default function DoublesPage() {
     muted: "rgba(0,0,0,0.6)",
     green: "#1a7f37",
     red: "#b42318",
+    soft: "#f6fbff",
   };
 
   const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
@@ -86,6 +309,18 @@ export default function DoublesPage() {
   const [lateCardId, setLateCardId] = useState("");
   const [lateMsg, setLateMsg] = useState("");
 
+  // ✅ Payout UI (similar to Putting, but single Team pot)
+  const [payoutsOpen, setPayoutsOpen] = useState(false);
+  const [payoutBuyIn, setPayoutBuyIn] = useState(
+    DEFAULT_PAYOUT_CONFIG.buyInDollars
+  );
+  const [payoutFeePct, setPayoutFeePct] = useState(
+    DEFAULT_PAYOUT_CONFIG.leagueFeePct
+  );
+
+  // Admin unlock window (prevents password prompt on every click)
+  const [adminOkUntil, setAdminOkUntil] = useState(0);
+
   // Ensure baseline shape
   const defaultDoubles = useMemo(
     () => ({
@@ -95,25 +330,28 @@ export default function DoublesPage() {
       manualCaliId: "",
       layoutNote: "",
       checkins: [], // [{id,name,pool}]
-      cali: {
-        playerId: "",
-        teammateId: "",
-      },
+      cali: { playerId: "", teammateId: "" },
       cards: [], // [{id, startHole, teams:[{id,type:"doubles"|"cali", players:[{id,name,pool}]}]}]
-      submissions: {}, // ✅ teamId -> {submittedAt, score, label, playersText, teamName}
+      submissions: {}, // teamId -> {submittedAt, score, label, playersText, teamName, cardId}
       leaderboard: [], // [{teamId, teamName, playersText, score}]
+      payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
+      payoutsPosted: {}, // teamId -> cents
       updatedAt: Date.now(),
     }),
     []
   );
 
-  // Admin-only helper: password on click
+  // Admin-only helper: password on click (10 min unlock)
   async function requireAdmin(fn) {
+    const now = Date.now();
+    if (now < adminOkUntil) return fn();
+
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
     }
+    setAdminOkUntil(now + 10 * 60 * 1000);
     return fn();
   }
 
@@ -133,18 +371,37 @@ export default function DoublesPage() {
         }
         const data = snap.data() || {};
         const d = data.doubles || defaultDoubles;
-        setDoubles(d);
+
+        // backfill payout fields if older docs
+        const safe = {
+          ...defaultDoubles,
+          ...d,
+          payoutConfig:
+            d.payoutConfig && typeof d.payoutConfig === "object"
+              ? { ...DEFAULT_PAYOUT_CONFIG, ...d.payoutConfig }
+              : { ...DEFAULT_PAYOUT_CONFIG },
+          payoutsPosted:
+            d.payoutsPosted && typeof d.payoutsPosted === "object"
+              ? d.payoutsPosted
+              : {},
+        };
+
+        setDoubles(safe);
         setLoading(false);
 
         // keep admin UI synced
-        setFormatChoice(d.format || "random");
-        setCaliMode(d.caliMode || "random");
-        setManualCaliId(d.manualCaliId || "");
-        setLayoutNote(d.layoutNote || "");
+        setFormatChoice(safe.format || "random");
+        setCaliMode(safe.caliMode || "random");
+        setManualCaliId(safe.manualCaliId || "");
+        setLayoutNote(safe.layoutNote || "");
+
+        // sync payout UI fields
+        setPayoutBuyIn(clampInt(safe.payoutConfig?.buyInDollars, 1, 50));
+        setPayoutFeePct(clampInt(safe.payoutConfig?.leagueFeePct, 1, 50));
 
         // default late card selection
-        if (!lateCardId && (d.cards || []).length) {
-          setLateCardId(d.cards[0].id);
+        if (!lateCardId && (safe.cards || []).length) {
+          setLateCardId(safe.cards[0].id);
         }
       },
       () => setLoading(false)
@@ -157,8 +414,18 @@ export default function DoublesPage() {
 
   const checkins = doubles?.checkins || [];
   const cards = doubles?.cards || [];
-  const submissions = doubles?.submissions || {}; // ✅ team submissions
+  const submissions = doubles?.submissions || {};
   const leaderboard = doubles?.leaderboard || [];
+  const payoutConfig =
+    doubles?.payoutConfig && typeof doubles.payoutConfig === "object"
+      ? { ...DEFAULT_PAYOUT_CONFIG, ...doubles.payoutConfig }
+      : { ...DEFAULT_PAYOUT_CONFIG };
+  const payoutsPosted =
+    doubles?.payoutsPosted && typeof doubles.payoutsPosted === "object"
+      ? doubles.payoutsPosted
+      : {};
+
+  const hasPostedPayouts = Object.keys(payoutsPosted || {}).length > 0;
 
   const checkinStatus = useMemo(() => {
     if (!checkins.length) return "No players checked in yet.";
@@ -178,6 +445,16 @@ export default function DoublesPage() {
         : "Cali: Random (only if odd #)";
     return { fmtLabel, caliLabel };
   }, [doubles]);
+
+  // Tie-aware places for leaderboard (ASC scoring)
+  const tiePlaces = useMemo(() => {
+    const rowsSorted = [...leaderboard].sort(
+      (a, b) => Number(a.score ?? 0) - Number(b.score ?? 0)
+    );
+    return computeTiePlacesAsc(
+      rowsSorted.map((r) => ({ teamId: r.teamId, score: Number(r.score ?? 0) }))
+    );
+  }, [leaderboard]);
 
   async function saveAdminSettings() {
     await requireAdmin(async () => {
@@ -407,8 +684,9 @@ export default function DoublesPage() {
           "doubles.layoutNote": layoutNote || "",
           "doubles.cali": built.cali,
           "doubles.cards": built.cardsOut,
-          "doubles.submissions": {}, // reset submissions
+          "doubles.submissions": {},
           "doubles.leaderboard": [],
+          "doubles.payoutsPosted": {}, // reset posted payouts for new round
           "doubles.updatedAt": Date.now(),
         });
 
@@ -442,6 +720,7 @@ export default function DoublesPage() {
       setCheckinName("");
       setStartRoundMsg("");
       setAdminExpanded(false);
+      setPayoutsOpen(false);
       alert("Doubles reset.");
     });
   }
@@ -451,7 +730,6 @@ export default function DoublesPage() {
     const card = cards.find((c) => c.id === cardId);
     if (!card) return;
 
-    // reset message
     setSubmitMsgByCard((m) => ({ ...m, [cardId]: "" }));
     setSubmitMsgColorByCard((m) => ({ ...m, [cardId]: COLORS.muted }));
 
@@ -468,7 +746,7 @@ export default function DoublesPage() {
       }
 
       const n = Number(raw);
-      const score = clamp(isNaN(n) ? 0 : n, -18, 18);
+      const score = clamp(Number.isNaN(n) ? 0 : n, -18, 18);
 
       nextSubmissions[t.id] = {
         submittedAt: Date.now(),
@@ -511,7 +789,6 @@ export default function DoublesPage() {
       [cardId]: "✅ Card scores submitted.",
     }));
 
-    // auto-clear after a moment
     setTimeout(() => {
       setSubmitMsgByCard((m) => ({ ...m, [cardId]: "" }));
     }, 2500);
@@ -643,6 +920,119 @@ export default function DoublesPage() {
     });
   }
 
+  // ----------------- Payout actions (Team payouts) -----------------
+  function computeTeamPayoutsCents() {
+    // pot is based on PLAYERS (checkins), paid to TEAMS (leaderboard rows)
+    const buyIn = clampInt(payoutConfig.buyInDollars, 1, 50);
+    const feePct = clampInt(payoutConfig.leagueFeePct, 1, 50);
+
+    const playerCount = checkins.length;
+    const teamCount = leaderboard.length;
+
+    if (playerCount <= 0)
+      return { ok: false, reason: "No players checked in." };
+    if (teamCount <= 0)
+      return { ok: false, reason: "No teams on leaderboard yet." };
+
+    const totalPotCents = toCents(buyIn) * playerCount;
+    const feeCents = Math.round((totalPotCents * feePct) / 100);
+    const potAfterFeeCents = Math.max(0, totalPotCents - feeCents);
+
+    const nPlaces = payoutPlacesForTeamCount(teamCount);
+    const shares = sharesByPlaces(nPlaces);
+
+    const rowsSorted = [...leaderboard]
+      .map((r) => ({
+        teamId: r.teamId,
+        score: Number(r.score ?? 0),
+      }))
+      .sort((a, b) => a.score - b.score);
+
+    const payouts = computeTieAwarePayoutsForTeams(
+      rowsSorted,
+      shares,
+      potAfterFeeCents
+    );
+
+    return {
+      ok: true,
+      payouts,
+      meta: {
+        buyIn,
+        feePct,
+        playerCount,
+        teamCount,
+        totalPotCents,
+        feeCents,
+        potAfterFeeCents,
+        nPlaces,
+      },
+    };
+  }
+
+  async function savePayoutConfig() {
+    await requireAdmin(async () => {
+      const buyIn = clampInt(payoutBuyIn, 1, 50);
+      const feePct = clampInt(payoutFeePct, 1, 50);
+
+      await updateDoc(leagueRef, {
+        "doubles.payoutConfig": {
+          buyInDollars: buyIn,
+          leagueFeePct: feePct,
+          updatedAt: Date.now(),
+        },
+        "doubles.payoutsPosted": {}, // clear posted payouts when config changes
+        "doubles.updatedAt": Date.now(),
+      });
+
+      setPayoutsOpen(false);
+      alert("Payout settings saved ✅ (posted payouts cleared)");
+    });
+  }
+
+  async function postPayoutsToLeaderboard() {
+    await requireAdmin(async () => {
+      const res = computeTeamPayoutsCents();
+      if (!res.ok) {
+        alert(res.reason || "Unable to compute payouts.");
+        return;
+      }
+
+      const ok = window.confirm(
+        `Post payouts?\n\nPlayers: ${res.meta.playerCount}\nTeams: ${
+          res.meta.teamCount
+        }\nPot after fee: $${fromCents(
+          res.meta.potAfterFeeCents
+        )}\nPaid places: ${
+          res.meta.nPlaces
+        }\n\nThis will show $ amounts and green placement badges for paid teams.`
+      );
+      if (!ok) return;
+
+      await updateDoc(leagueRef, {
+        "doubles.payoutsPosted": res.payouts,
+        "doubles.updatedAt": Date.now(),
+      });
+
+      alert("Payouts posted ✅");
+    });
+  }
+
+  async function clearPostedPayouts() {
+    await requireAdmin(async () => {
+      const ok = window.confirm("Clear posted payouts from the leaderboard?");
+      if (!ok) return;
+
+      await updateDoc(leagueRef, {
+        "doubles.payoutsPosted": {},
+        "doubles.updatedAt": Date.now(),
+      });
+
+      alert("Posted payouts cleared.");
+    });
+  }
+
+  // ----------------- Styles -----------------
   const pageWrap = {
     minHeight: "100vh",
     background: `linear-gradient(180deg, ${COLORS.blueLight} 0%, #ffffff 60%)`,
@@ -698,6 +1088,13 @@ export default function DoublesPage() {
     );
   }
 
+  // Convenience: show payout config summary
+  const payoutSummary = `${clampInt(
+    payoutConfig.buyInDollars,
+    1,
+    50
+  )} buy-in • ${clampInt(payoutConfig.leagueFeePct, 1, 50)}% fee`;
+
   return (
     <div style={pageWrap}>
       <div style={container}>
@@ -731,6 +1128,30 @@ export default function DoublesPage() {
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <b>Check-in:</b> {checkinStatus}
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  <b>Payouts:</b> {payoutSummary}
+                  {hasPostedPayouts ? (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontWeight: 900,
+                        color: COLORS.green,
+                      }}
+                    >
+                      • Posted
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontWeight: 900,
+                        color: COLORS.muted,
+                      }}
+                    >
+                      • Not posted
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -977,7 +1398,6 @@ export default function DoublesPage() {
                                   </div>
                                 </div>
 
-                                {/* ✅ Team score input (no per-team submit button) */}
                                 <div
                                   style={{
                                     marginTop: 10,
@@ -1014,7 +1434,6 @@ export default function DoublesPage() {
                           })}
                         </div>
 
-                        {/* ✅ SINGLE submit button for the whole card */}
                         <div
                           style={{ marginTop: 12, display: "grid", gap: 10 }}
                         >
@@ -1066,32 +1485,113 @@ export default function DoublesPage() {
               </div>
             ) : (
               <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                {leaderboard.map((e) => (
-                  <div
-                    key={e.teamId}
-                    style={{
-                      border: `1px solid ${COLORS.border}`,
-                      borderRadius: 14,
-                      padding: 12,
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      alignItems: "center",
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-                        {e.playersText || "Team"}
+                {leaderboard.map((e) => {
+                  const place = tiePlaces[e.teamId] || 1;
+                  const payoutCents =
+                    Number(payoutsPosted?.[e.teamId] ?? 0) || 0;
+                  const isPaid = payoutCents > 0;
+                  const badgeBg = isPaid ? COLORS.green : COLORS.navy;
+
+                  return (
+                    <div
+                      key={e.teamId}
+                      style={{
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: 14,
+                        padding: 12,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        alignItems: "center",
+                        background: COLORS.soft,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          minWidth: 0,
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 42,
+                            height: 42,
+                            borderRadius: 14,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontWeight: 1000,
+                            color: "white",
+                            background: badgeBg,
+                            flexShrink: 0,
+                          }}
+                          title={isPaid ? "Paid out" : "Not paid"}
+                        >
+                          {place}
+                        </div>
+
+                        <div style={{ minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontWeight: 1000,
+                              color: COLORS.navy,
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {e.playersText || "Team"}
+                            {payoutCents > 0 ? (
+                              <span
+                                style={{
+                                  marginLeft: 10,
+                                  fontSize: 12,
+                                  fontWeight: 1000,
+                                  color: COLORS.green,
+                                }}
+                              >
+                                ${fromCents(payoutCents)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: COLORS.muted,
+                              fontWeight: 900,
+                            }}
+                          >
+                            {e.teamName || "Team"}
+                            {hasPostedPayouts ? (
+                              <span
+                                style={{
+                                  marginLeft: 8,
+                                  fontWeight: 900,
+                                  color: isPaid ? COLORS.green : COLORS.muted,
+                                }}
+                              >
+                                • {isPaid ? "Paid" : "Not paid"}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ fontSize: 12, color: COLORS.muted }}>
-                        {e.teamName}
+
+                      <div
+                        style={{
+                          fontWeight: 1000,
+                          fontSize: 18,
+                          color: COLORS.navy,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {scoreLabel(Number(e.score ?? 0))}
                       </div>
                     </div>
-                    <div style={{ fontWeight: 1000, fontSize: 18 }}>
-                      {scoreLabel(e.score)}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1216,6 +1716,174 @@ export default function DoublesPage() {
                   <button style={button(true)} onClick={saveAdminSettings}>
                     Save Settings (Admin)
                   </button>
+                </div>
+              </div>
+
+              {/* ✅ Payouts (Team) */}
+              <div style={{ ...cardStyle, padding: 12 }}>
+                <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                  Payouts (Teams)
+                </div>
+
+                <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: COLORS.muted,
+                      fontWeight: 900,
+                    }}
+                  >
+                    Current:{" "}
+                    <span style={{ color: COLORS.navy }}>{payoutSummary}</span>
+                    {hasPostedPayouts ? (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          color: COLORS.green,
+                          fontWeight: 1000,
+                        }}
+                      >
+                        • Posted
+                      </span>
+                    ) : (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          color: COLORS.muted,
+                          fontWeight: 1000,
+                        }}
+                      >
+                        • Not posted
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    style={{
+                      ...button(false),
+                      border: `2px solid ${COLORS.navy}`,
+                      background: "#fff",
+                    }}
+                    onClick={() =>
+                      requireAdmin(async () => {
+                        setPayoutsOpen((v) => !v);
+                      })
+                    }
+                  >
+                    {payoutsOpen
+                      ? "Close Payout Configuration"
+                      : "Configure Payouts"}
+                  </button>
+
+                  {payoutsOpen && (
+                    <div
+                      style={{
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: 14,
+                        padding: 12,
+                        background: COLORS.soft,
+                        display: "grid",
+                        gap: 10,
+                      }}
+                    >
+                      <label
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 1000,
+                          color: COLORS.navy,
+                        }}
+                      >
+                        Buy-In per PLAYER ($)
+                        <input
+                          style={{ ...input, marginTop: 6 }}
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={payoutBuyIn}
+                          onChange={(e) => setPayoutBuyIn(e.target.value)}
+                        />
+                      </label>
+
+                      <label
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 1000,
+                          color: COLORS.navy,
+                        }}
+                      >
+                        League Fee (%)
+                        <input
+                          style={{ ...input, marginTop: 6 }}
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={payoutFeePct}
+                          onChange={(e) => setPayoutFeePct(e.target.value)}
+                        />
+                      </label>
+
+                      <button
+                        style={{
+                          padding: "12px 14px",
+                          borderRadius: 12,
+                          border: `2px solid ${COLORS.green}`,
+                          background: COLORS.green,
+                          color: "white",
+                          fontWeight: 1000,
+                          cursor: "pointer",
+                        }}
+                        onClick={savePayoutConfig}
+                      >
+                        Save Payout Settings (Admin)
+                      </button>
+
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: COLORS.muted,
+                          fontWeight: 900,
+                        }}
+                      >
+                        Saving clears posted payouts (if any).
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    style={{
+                      padding: "12px 14px",
+                      borderRadius: 12,
+                      border: `2px solid ${COLORS.red}`,
+                      background: "#fff",
+                      fontWeight: 1000,
+                      cursor: "pointer",
+                    }}
+                    onClick={postPayoutsToLeaderboard}
+                    disabled={leaderboard.length === 0}
+                    title={
+                      leaderboard.length === 0
+                        ? "Need scores on the leaderboard first."
+                        : "Posts payouts and turns paid place badges green."
+                    }
+                  >
+                    Post Payouts to Leaderboard (Admin)
+                  </button>
+
+                  {hasPostedPayouts && (
+                    <button
+                      style={{
+                        padding: "12px 14px",
+                        borderRadius: 12,
+                        border: `2px solid ${COLORS.navy}`,
+                        background: "#fff",
+                        fontWeight: 900,
+                        cursor: "pointer",
+                      }}
+                      onClick={clearPostedPayouts}
+                    >
+                      Clear Posted Payouts (Admin)
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1372,6 +2040,18 @@ export default function DoublesPage() {
               </div>
             </div>
           )}
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            fontSize: 12,
+            opacity: 0.6,
+            textAlign: "center",
+          }}
+        >
+          {APP_VERSION} • Pot is computed from player check-ins (buy-in per
+          player) • Payouts are posted to teams
         </div>
 
         <div style={{ height: 30 }} />
