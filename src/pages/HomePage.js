@@ -32,14 +32,12 @@ export default function HomePage() {
   // Modal state
   const [showLeagueDialog, setShowLeagueDialog] = useState(false);
   const [leagueIdInput, setLeagueIdInput] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState("");
 
   function openLeagueDialog() {
     setJoinError("");
     setLeagueIdInput("");
-    setPasswordInput("");
     setShowLeagueDialog(true);
   }
 
@@ -52,7 +50,6 @@ export default function HomePage() {
     setJoinError("");
 
     const leagueId = leagueIdInput.trim();
-    const pw = passwordInput;
 
     if (!leagueId) {
       setJoinError("Please enter a league name/code.");
@@ -69,15 +66,6 @@ export default function HomePage() {
 
       if (!snap.exists()) {
         setJoinError("League not found. Check the name/code and try again.");
-        return;
-      }
-
-      const data = snap.data() || {};
-      const requiredPw = data.joinPassword || "";
-
-      // If the league has a password set, require it
-      if (requiredPw && pw !== requiredPw) {
-        setJoinError("Incorrect password.");
         return;
       }
 
@@ -126,7 +114,7 @@ export default function HomePage() {
               Doubles
             </NavLink>
 
-            {/* ✅ League button now opens modal */}
+            {/* League button opens modal */}
             <button
               type="button"
               style={buttonStyle}
@@ -186,19 +174,6 @@ export default function HomePage() {
                       fontSize: 14,
                     }}
                     autoFocus
-                  />
-
-                  <input
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    placeholder="Password (if required)"
-                    type="password"
-                    style={{
-                      padding: 12,
-                      borderRadius: 12,
-                      border: "1px solid #ccc",
-                      fontSize: 14,
-                    }}
                   />
 
                   {joinError && (
