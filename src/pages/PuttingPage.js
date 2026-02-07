@@ -775,6 +775,8 @@ export default function PuttingPage() {
 
     setSelectedForCard([]);
     setCardName("");
+    setName("");
+    setPool("A");
   }
 
   async function beginRoundOne() {
@@ -1326,16 +1328,32 @@ export default function PuttingPage() {
         >
           <Header />
 
-          {/* ✅ League line now matches Tag page: "League: X • Back to League" */}
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-            League: <strong>{leagueId}</strong>
-            <span style={{ margin: "0 8px", opacity: 0.6 }}>•</span>
+          {/* ✅ THIS IS THE FIX: add Back to League next to league name (same line/placement) */}
+          <div
+            style={{
+              marginTop: 10,
+              fontSize: 12,
+              opacity: 0.7,
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <span>
+              League: <strong>{leagueId}</strong>
+            </span>
+
+            <span style={{ opacity: 0.6 }}>•</span>
+
             <NavLink
-              to={`/league/${leagueId}`}
+              to={`/league/${encodeURIComponent(leagueId)}`}
               style={{
                 fontWeight: 900,
                 color: COLORS.navy,
                 textDecoration: "none",
+                opacity: 1, // make sure it doesn't fade out with parent opacity
               }}
             >
               Back to League
