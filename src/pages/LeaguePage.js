@@ -1,112 +1,39 @@
-// src/pages/LeaguePage.js
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 
-const ADMIN_PASSWORD = "Pescado!"; // same pattern you use elsewhere
-
-function sanitizeLeagueId(raw) {
-  // Firestore doc ids can contain many chars, but keeping it simple avoids URL weirdness.
-  const s = (raw || "").trim().toLowerCase();
-  // allow letters, numbers, dash, underscore only
-  const cleaned = s.replace(/[^a-z0-9_-]/g, "");
-  return cleaned;
-}
+const ADMIN_PASSWORD = "Pescado!admin"; // 🔐 admin-only
 
 export default function LeaguePage() {
   const navigate = useNavigate();
 
   const [leagueId, setLeagueId] = useState("");
-
-  // create-new-league fields
   const [newLeagueId, setNewLeagueId] = useState("");
-  const [newLeagueName, setNewLeagueName] = useState("");
-  const [createMsg, setCreateMsg] = useState("");
-  const [createMsgColor, setCreateMsgColor] = useState("rgba(0,0,0,0.65)");
   const [creating, setCreating] = useState(false);
+  const [msg, setMsg] = useState("");
 
-  const COLORS = useMemo(
-    () => ({
-      navy: "#1b1f5a",
-      orange: "#f4a83a",
-      border: "rgba(27,31,90,0.25)",
-      card: "#ffffff",
-      muted: "rgba(0,0,0,0.65)",
-      soft: "#f6fbff",
-      green: "#1a7f37",
-      red: "#b42318",
-    }),
-    []
-  );
-
-  const pageWrap = {
-    minHeight: "100vh",
-    background: `linear-gradient(180deg, ${COLORS.soft} 0%, #ffffff 60%)`,
-    display: "flex",
-    justifyContent: "center",
-    padding: 24,
+  const COLORS = {
+    navy: "#1b1f5a",
+    orange: "#f4a83a",
+    border: "rgba(27,31,90,0.25)",
+    card: "#ffffff",
+    muted: "rgba(0,0,0,0.65)",
+    soft: "#f6fbff",
+    red: "#b42318",
+    green: "#1a7f37",
   };
 
-  const container = { width: "100%", maxWidth: 860 };
-
-  const card = {
-    background: COLORS.card,
-    border: `1px solid ${COLORS.border}`,
-    borderRadius: 16,
-    padding: 18,
-    boxShadow: "0 8px 22px rgba(0,0,0,0.06)",
-    textAlign: "center",
-  };
-
-  const panel = {
-    marginTop: 18,
-    textAlign: "left",
-    border: `1px solid ${COLORS.border}`,
-    borderRadius: 16,
-    padding: 14,
-    background: COLORS.soft,
-  };
-
-  const input = {
-    width: "100%",
-    padding: "14px 14px",
-    borderRadius: 14,
-    border: `1px solid ${COLORS.border}`,
-    outline: "none",
-    fontSize: 16,
-  };
-
-  const btn = (primary = true) => ({
-    padding: "14px 18px",
-    borderRadius: 14,
-    border: `2px solid ${COLORS.navy}`,
-    background: primary ? COLORS.navy : "#fff",
-    color: primary ? "white" : COLORS.navy,
-    fontWeight: 1000,
-    cursor: "pointer",
-    minWidth: 120,
-  });
-
-  function go() {
-    const id = sanitizeLeagueId(leagueId);
+  async function goToLeague() {
+    const id = leagueId.trim();
     if (!id) return;
     navigate(`/league/${encodeURIComponent(id)}`);
   }
 
   async function createLeague() {
-    setCreateMsg("");
-    setCreateMsgColor(COLORS.muted);
-
-    const id = sanitizeLeagueId(newLeagueId);
-    if (!id) {
-      setCreateMsgColor(COLORS.red);
-      setCreateMsg(
-        "Please enter a valid league id (letters/numbers/dash/underscore)."
-      );
-      return;
-    }
+    const id = newLeagueId.trim();
+    if (!id) return;
 
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
@@ -115,6 +42,8 @@ export default function LeaguePage() {
     }
 
     setCreating(true);
+    setMsg("");
+
     try {
       await ensureAnonAuth();
 
@@ -122,123 +51,211 @@ export default function LeaguePage() {
       const snap = await getDoc(ref);
 
       if (snap.exists()) {
-        setCreateMsgColor(COLORS.red);
-        setCreateMsg(`League "${id}" already exists.`);
+        setMsg("❌ League already exists.");
         setCreating(false);
         return;
       }
 
-      // Minimal “league shell”. Each page can create its own subsection if missing,
-      // but this gives you a nice display name + createdAt.
-      const payload = {
-        name: (newLeagueName || "").trim() || id,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
+      await setDoc(ref, {
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
 
-      await setDoc(ref, payload, { merge: true });
+        // Tags
+        players: [],
+        rounds: [],
+        roundHistory: [],
+        defendMode: {
+          enabled: false,
+          scope: "podium",
+          durationType: "weeks",
+          weeks: 2,
+          tagExpiresAt: {},
+        },
 
-      setCreateMsgColor(COLORS.green);
-      setCreateMsg(`✅ League created: ${id}`);
+        // Putting
+        puttingLeague: {
+          locked: false,
+          finalized: false,
+          stations: 1,
+          rounds: 1,
+          currentRound: 1,
+          cardMode: "manual",
+          players: [],
+          cardsByRound: {},
+          scores: {},
+          submitted: {},
+          adjustments: {},
+        },
 
-      // jump straight into the new league
-      navigate(`/league/${encodeURIComponent(id)}`);
-    } catch (err) {
-      setCreateMsgColor(COLORS.red);
-      setCreateMsg(
-        `❌ Failed to create league: ${err?.message || String(err)}`
-      );
-    } finally {
-      setCreating(false);
+        // Doubles
+        doubles: {
+          started: false,
+          format: "random",
+          checkins: [],
+          cards: [],
+          submissions: {},
+          leaderboard: [],
+          payoutConfig: {
+            enabled: true,
+            buyInDollars: 5,
+            leagueFeePct: 10,
+          },
+          payoutsPosted: {},
+        },
+      });
+
+      setMsg("✅ League created successfully.");
+      setNewLeagueId("");
+
+      setTimeout(() => {
+        navigate(`/league/${encodeURIComponent(id)}`);
+      }, 700);
+    } catch (e) {
+      console.error(e);
+      setMsg("❌ Failed to create league. Check console.");
     }
+
+    setCreating(false);
   }
 
   return (
-    <div style={pageWrap}>
-      <div style={container}>
-        <div style={card}>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: `linear-gradient(180deg, ${COLORS.soft} 0%, #ffffff 60%)`,
+        display: "flex",
+        justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div style={{ width: "100%", maxWidth: 860 }}>
+        <div
+          style={{
+            background: COLORS.card,
+            border: `1px solid ${COLORS.border}`,
+            borderRadius: 16,
+            padding: 20,
+            boxShadow: "0 8px 22px rgba(0,0,0,0.06)",
+            textAlign: "center",
+          }}
+        >
           <Header />
+
           <h2 style={{ marginTop: 12, color: COLORS.navy }}>Search League</h2>
 
-          {/* Go to league */}
-          <div style={panel}>
+          {/* 🔎 Search */}
+          <div
+            style={{
+              marginTop: 18,
+              textAlign: "left",
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 16,
+              padding: 14,
+              background: COLORS.soft,
+            }}
+          >
             <div style={{ fontWeight: 1000, color: COLORS.navy }}>
-              Go to a league by ID
+              Go to league by ID
             </div>
 
             <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
               <input
-                style={input}
-                placeholder="Enter league id..."
+                style={{
+                  flex: 1,
+                  padding: "14px",
+                  borderRadius: 14,
+                  border: `1px solid ${COLORS.border}`,
+                  fontSize: 16,
+                }}
+                placeholder="Enter league id…"
                 value={leagueId}
                 onChange={(e) => setLeagueId(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") go();
-                }}
+                onKeyDown={(e) => e.key === "Enter" && goToLeague()}
               />
-              <button style={btn(true)} onClick={go}>
+              <button
+                style={{
+                  padding: "14px 18px",
+                  borderRadius: 14,
+                  border: `2px solid ${COLORS.navy}`,
+                  background: COLORS.navy,
+                  color: "white",
+                  fontWeight: 1000,
+                  cursor: "pointer",
+                }}
+                onClick={goToLeague}
+              >
                 Go
               </button>
             </div>
           </div>
 
-          {/* Create new league (Admin) */}
-          <div style={panel}>
+          {/* 🛠 Admin */}
+          <div
+            style={{
+              marginTop: 20,
+              textAlign: "left",
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 16,
+              padding: 14,
+              background: "#f8fbff",
+            }}
+          >
             <div style={{ fontWeight: 1000, color: COLORS.navy }}>
               Create New League (Admin)
             </div>
-            <div
-              style={{
-                fontSize: 13,
-                color: COLORS.muted,
-                fontWeight: 800,
-                marginTop: 4,
-              }}
-            >
-              Creates a new league in Firestore. Pages
-              (Home/Tags/Putting/Doubles) work automatically from the league id.
-            </div>
 
-            <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+            <div style={{ marginTop: 10 }}>
               <input
-                style={input}
-                placeholder="New league id (ex: pescado, saturday_dubs, winter-2026)"
+                style={{
+                  width: "100%",
+                  padding: "14px",
+                  borderRadius: 14,
+                  border: `1px solid ${COLORS.border}`,
+                  fontSize: 16,
+                }}
+                placeholder="New league id (ex: pescado, winter-2026)"
                 value={newLeagueId}
                 onChange={(e) => setNewLeagueId(e.target.value)}
               />
+            </div>
 
-              <input
-                style={input}
-                placeholder='Display name (optional) (ex: "Pescado Mojado")'
-                value={newLeagueName}
-                onChange={(e) => setNewLeagueName(e.target.value)}
-              />
-
-              <div
-                style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}
+            <div
+              style={{
+                marginTop: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+              }}
+            >
+              <button
+                onClick={createLeague}
+                disabled={creating}
+                style={{
+                  padding: "14px 20px",
+                  borderRadius: 14,
+                  border: `2px solid ${COLORS.navy}`,
+                  background: COLORS.orange,
+                  fontWeight: 1000,
+                  cursor: "pointer",
+                }}
               >
-                <button
-                  style={{
-                    ...btn(false),
-                    border: `2px solid ${COLORS.navy}`,
-                  }}
-                  onClick={createLeague}
-                  disabled={creating}
-                  title="Password protected"
-                >
-                  {creating ? "Creating..." : "Create League"}
-                </button>
-              </div>
+                Create League
+              </button>
 
-              {!!createMsg && (
-                <div style={{ fontWeight: 900, color: createMsgColor }}>
-                  {createMsg}
+              {msg && (
+                <div
+                  style={{
+                    fontWeight: 900,
+                    color: msg.startsWith("✅") ? COLORS.green : COLORS.red,
+                  }}
+                >
+                  {msg}
                 </div>
               )}
             </div>
           </div>
 
-          <div style={{ marginTop: 16, fontSize: 12, opacity: 0.6 }}>
+          <div style={{ marginTop: 14, fontSize: 12, opacity: 0.6 }}>
             (League IDs are not listed here by design.)
           </div>
         </div>
