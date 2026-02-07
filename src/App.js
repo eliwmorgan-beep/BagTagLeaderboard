@@ -12,10 +12,17 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<HomePage />} />
+
+        {/* Existing pages */}
         <Route path="/tags" element={<TagsPage />} />
         <Route path="/putting" element={<PuttingPage />} />
         <Route path="/doubles" element={<DoublesPage />} />
+
+        {/* League routes */}
         <Route path="/league" element={<LeaguePage />} />
+        <Route path="/league/:leagueId" element={<LeaguePage />} />
+
+        {/* Catch-all */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
