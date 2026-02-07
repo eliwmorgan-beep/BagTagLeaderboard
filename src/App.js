@@ -15,6 +15,9 @@ export default function App() {
         {/* ✅ Home = League selector / hub */}
         <Route path="/" element={<LeaguePage />} />
 
+        {/* ✅ Guard: /league with no id should go back to chooser */}
+        <Route path="/league" element={<Navigate to="/" replace />} />
+
         {/* ✅ Per-league pages */}
         <Route path="/league/:leagueId" element={<TagsPage />} />
         <Route path="/league/:leagueId/putting" element={<PuttingPage />} />
