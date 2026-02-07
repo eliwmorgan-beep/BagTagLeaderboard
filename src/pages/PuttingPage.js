@@ -13,7 +13,7 @@ import {
 } from "firebase/firestore";
 
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.7.0";
+const APP_VERSION = "v1.6.7";
 
 // ✅ defaults now start at 0, and payouts can be enabled/disabled
 const DEFAULT_PAYOUT_CONFIG = {
@@ -285,6 +285,21 @@ export default function PuttingPage() {
     padding: "8px 12px",
   };
 
+  const pillRowStyle = {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+  };
+
+  const pillStyle = (active) => ({
+    ...smallButtonStyle,
+    width: "100%",
+    background: active ? COLORS.navy : "#fff",
+    color: active ? "white" : COLORS.navy,
+    border: `1px solid ${COLORS.navy}`,
+    fontWeight: 900,
+  });
+
   // ✅ Firestore ref is now based on selected league (URL param)
   const leagueRef = useMemo(() => {
     if (!leagueId) return null;
@@ -297,29 +312,20 @@ export default function PuttingPage() {
       stations: 1,
       rounds: 1,
       locked: false,
-      currentRound: 0, // simultaneous mode uses this; sequential can ignore it
+      currentRound: 0,
       finalized: false,
-      cardMode: "", // "" | "manual" | "random" (simultaneous)
+      cardMode: "", // "" | "manual" | "random"
+      // NEW:
       formatMode: "simultaneous", // "simultaneous" | "sequential"
+      poolMode: "split", // "split" | "combined"
     },
-
-    // shared
     players: [],
-    adjustments: {},
-    payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-    payoutsPosted: {}, // { [playerId]: dollars }
-
-    // ----- Simultaneous mode data (existing behavior) -----
     cardsByRound: {},
     scores: {},
     submitted: {},
-
-    // ----- Sequential mode data (new) -----
-    // runs = individual “play cards” that move through stations, one round at a time.
-    // Example run: { id, name, playerIds, roundNum, createdAt, submittedAt, submitted }
-    seqRuns: [],
-    seqScoresByRun: {}, // { [runId]: { [stationNum]: { [playerId]: made } } }
-    seqRoundsCompleted: {}, // { [playerId]: number }  // shown on leaderboard as "through round X"
+    adjustments: {},
+    payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
+    payoutsPosted: {}, // { [playerId]: dollars }
   });
 
   const [loading, setLoading] = useState(false);
@@ -337,13 +343,9 @@ export default function PuttingPage() {
   const [name, setName] = useState("");
   const [pool, setPool] = useState("A");
 
-  // Manual card creation UI (Round 1) (simultaneous)
+  // Manual card creation UI (Round 1)
   const [selectedForCard, setSelectedForCard] = useState([]);
   const [cardName, setCardName] = useState("");
-
-  // Sequential run creation UI
-  const [seqSelected, setSeqSelected] = useState([]);
-  const [seqRunName, setSeqRunName] = useState("");
 
   // Scorekeeper selection UI
   const [activeCardId, setActiveCardId] = useState("");
@@ -354,14 +356,15 @@ export default function PuttingPage() {
 
   // -------- Helpers (computed) --------
   const settings = putting.settings || {};
-  const stations = Math.max(1, Math.min(10, Number(settings.stations || 1)));
+  const stations = Math.max(1, Math.min(18, Number(settings.stations || 1))); // ✅ up to 18
   const totalRounds = Math.max(1, Math.min(5, Number(settings.rounds || 1)));
   const currentRound = Number(settings.currentRound || 0);
   const finalized = !!settings.finalized;
   const cardMode = String(settings.cardMode || "");
   const formatMode =
     settings.formatMode === "sequential" ? "sequential" : "simultaneous";
-  const isSequential = formatMode === "sequential";
+  const poolMode = settings.poolMode === "combined" ? "combined" : "split";
+  const poolsEnabled = poolMode === "split";
 
   const players = Array.isArray(putting.players) ? putting.players : [];
   const cardsByRound =
@@ -391,18 +394,7 @@ export default function PuttingPage() {
       ? putting.payoutsPosted
       : {};
 
-  // Sequential data
-  const seqRuns = Array.isArray(putting.seqRuns) ? putting.seqRuns : [];
-  const seqScoresByRun =
-    putting.seqScoresByRun && typeof putting.seqScoresByRun === "object"
-      ? putting.seqScoresByRun
-      : {};
-  const seqRoundsCompleted =
-    putting.seqRoundsCompleted && typeof putting.seqRoundsCompleted === "object"
-      ? putting.seqRoundsCompleted
-      : {};
-
-  const roundStarted = settings.locked && (currentRound >= 1 || isSequential);
+  const roundStarted = settings.locked && currentRound >= 1;
 
   const r1Cards = Array.isArray(cardsByRound["1"]) ? cardsByRound["1"] : [];
   const currentCards = Array.isArray(cardsByRound[String(currentRound)])
@@ -424,7 +416,7 @@ export default function PuttingPage() {
     }
   }, [roundStarted]);
 
-  // Return null if missing/unrecorded; otherwise 0..4 (simultaneous)
+  // Return null if missing/unrecorded; otherwise 0..4
   function madeFor(roundNum, stationNum, playerId) {
     const r = scores?.[String(roundNum)] || {};
     const st = r?.[String(stationNum)] || {};
@@ -436,7 +428,7 @@ export default function PuttingPage() {
     return Number.isNaN(n) ? null : n;
   }
 
-  // 0 is valid and counts as recorded; only undefined/null/"" is missing (simultaneous)
+  // 0 is valid and counts as recorded; only undefined/null/"" is missing
   function rawMadeExists(roundNum, stationNum, playerId) {
     const r = scores?.[String(roundNum)] || {};
     const st = r?.[String(stationNum)] || {};
@@ -461,56 +453,26 @@ export default function PuttingPage() {
     return total;
   }
 
-  // -------- Sequential helpers --------
-  function playerCompletedRounds(playerId) {
-    const v = Number(seqRoundsCompleted?.[playerId] ?? 0);
-    return Number.isNaN(v) ? 0 : Math.max(0, Math.min(totalRounds, v));
+  function submittedCountForRound(roundNum) {
+    const cards = Array.isArray(cardsByRound[String(roundNum)])
+      ? cardsByRound[String(roundNum)]
+      : [];
+    const sub = submitted?.[String(roundNum)] || {};
+    const count = cards.filter((c) => !!sub?.[c.id]).length;
+    return { submitted: count, total: cards.length };
   }
 
-  function nextRoundForPlayer(playerId) {
-    const done = playerCompletedRounds(playerId);
-    return Math.min(totalRounds, done + 1);
+  function allCardsSubmittedForRound(roundNum) {
+    const { submitted: s, total: t } = submittedCountForRound(roundNum);
+    return t > 0 && s === t;
   }
 
-  function seqRunScoreMade(runId, stationNum, playerId) {
-    const run = seqScoresByRun?.[runId] || {};
-    const st = run?.[String(stationNum)] || {};
-    const raw = st?.[playerId];
-    if (raw === undefined || raw === null || raw === "") return null;
-    const n = Number(raw);
-    return Number.isNaN(n) ? null : n;
-  }
-
-  function seqRunRawMadeExists(runId, stationNum, playerId) {
-    const run = seqScoresByRun?.[runId] || {};
-    const st = run?.[String(stationNum)] || {};
-    const raw = st?.[playerId];
-    return !(raw === undefined || raw === null || raw === "");
-  }
-
-  function seqRunTotalForPlayer(runId, playerId) {
-    let total = 0;
-    for (let s = 1; s <= stations; s++) {
-      const made = seqRunScoreMade(runId, s, playerId);
-      total += pointsForMade(made ?? 0);
-    }
-    return total;
-  }
-
-  function seqCumulativeBaseTotalForPlayer(playerId) {
-    // Sum all submitted runs for that player (up to totalRounds; runs themselves carry roundNum)
-    let total = 0;
-    for (const run of seqRuns) {
-      if (!run || !run.submitted) continue;
-      const ids = Array.isArray(run.playerIds) ? run.playerIds : [];
-      if (!ids.includes(playerId)) continue;
-      total += seqRunTotalForPlayer(run.id, playerId);
-    }
-    return total;
-  }
-
-  function seqUnsubmittedRuns() {
-    return seqRuns.filter((r) => r && !r.submitted);
+  function missingCardsForRound(roundNum) {
+    const cards = Array.isArray(cardsByRound[String(roundNum)])
+      ? cardsByRound[String(roundNum)]
+      : [];
+    const sub = submitted?.[String(roundNum)] || {};
+    return cards.filter((c) => !sub?.[c.id]);
   }
 
   // ✅ Admin password gate (unlocks for 10 minutes on THIS device/tab)
@@ -562,6 +524,7 @@ export default function PuttingPage() {
               finalized: false,
               cardMode: "",
               formatMode: "simultaneous",
+              poolMode: "split",
             },
             players: [],
             cardsByRound: {},
@@ -570,11 +533,6 @@ export default function PuttingPage() {
             adjustments: {},
             payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
             payoutsPosted: {},
-
-            // sequential
-            seqRuns: [],
-            seqScoresByRun: {},
-            seqRoundsCompleted: {},
           },
         });
       }
@@ -595,6 +553,7 @@ export default function PuttingPage() {
               finalized: false,
               cardMode: "",
               formatMode: "simultaneous",
+              poolMode: "split",
               ...(pl.settings || {}),
             },
             players: Array.isArray(pl.players) ? pl.players : [],
@@ -618,17 +577,6 @@ export default function PuttingPage() {
             payoutsPosted:
               pl.payoutsPosted && typeof pl.payoutsPosted === "object"
                 ? pl.payoutsPosted
-                : {},
-
-            // sequential
-            seqRuns: Array.isArray(pl.seqRuns) ? pl.seqRuns : [],
-            seqScoresByRun:
-              pl.seqScoresByRun && typeof pl.seqScoresByRun === "object"
-                ? pl.seqScoresByRun
-                : {},
-            seqRoundsCompleted:
-              pl.seqRoundsCompleted && typeof pl.seqRoundsCompleted === "object"
-                ? pl.seqRoundsCompleted
                 : {},
           };
 
@@ -668,7 +616,7 @@ export default function PuttingPage() {
     });
   }
 
-  // --------- Cards: generation/validation helpers (simultaneous) ---------
+  // --------- Cards: generation/validation helpers ---------
   function validateRound1Cards(cards) {
     if (!Array.isArray(cards) || cards.length === 0) {
       return { ok: false, reason: "No cards created yet." };
@@ -764,9 +712,7 @@ export default function PuttingPage() {
       alert("Scores are finalized. Reset to start a new league.");
       return;
     }
-
-    // In simultaneous mode, once started you cannot check in more players
-    if (!isSequential && roundStarted) return;
+    if (roundStarted) return;
 
     const n = (name || "").trim();
     if (!n) return;
@@ -779,19 +725,14 @@ export default function PuttingPage() {
       return;
     }
 
-    const newPlayer = { id: uid(), name: n, pool: pool || "A" };
-
-    // In sequential mode, initialize roundsCompleted if missing
-    if (isSequential) {
-      const nextMap = { ...(seqRoundsCompleted || {}) };
-      if (nextMap[newPlayer.id] === undefined) nextMap[newPlayer.id] = 0;
-      await updatePutting({
-        players: [...players, newPlayer],
-        seqRoundsCompleted: nextMap,
-      });
-    } else {
-      await updatePutting({ players: [...players, newPlayer] });
-    }
+    // ✅ If pools are combined, we still store a pool value (default "A"),
+    // but the UI/leaderboards ignore it.
+    const newPlayer = {
+      id: uid(),
+      name: n,
+      pool: poolsEnabled ? pool || "A" : "A",
+    };
+    await updatePutting({ players: [...players, newPlayer] });
 
     setName("");
     setPool("A");
@@ -877,14 +818,12 @@ export default function PuttingPage() {
       if (players.length < 2)
         return alert("Check in at least 2 players first.");
 
-      if (!isSequential) {
-        const check = validateRound1Cards(r1Cards);
-        if (!check.ok) {
-          alert(
-            `Round 1 can't begin yet.\n\n${check.reason}\n\nTip: Choose "Manually Create Cards" or "Randomize Cards" and make sure everyone is assigned.`
-          );
-          return;
-        }
+      const check = validateRound1Cards(r1Cards);
+      if (!check.ok) {
+        alert(
+          `Round 1 can't begin yet.\n\n${check.reason}\n\nTip: Choose "Manually Create Cards" or "Randomize Cards" and make sure everyone is assigned.`
+        );
+        return;
       }
 
       await updatePutting({
@@ -893,15 +832,14 @@ export default function PuttingPage() {
           stations,
           rounds: totalRounds,
           locked: true,
-          currentRound: isSequential ? 1 : 1,
+          currentRound: 1,
           finalized: false,
+          // formatMode + poolMode are now locked in once started
         },
-        submitted: !isSequential
-          ? {
-              ...(putting.submitted || {}),
-              1: putting.submitted?.["1"] || {},
-            }
-          : putting.submitted || {},
+        submitted: {
+          ...(putting.submitted || {}),
+          1: putting.submitted?.["1"] || {},
+        },
       });
 
       setSetupOpen(false);
@@ -914,9 +852,6 @@ export default function PuttingPage() {
 
   async function beginNextRound() {
     if (finalized) return;
-
-    // Not used in sequential mode
-    if (isSequential) return;
 
     await requireAdmin(async () => {
       if (!settings.locked || currentRound < 1)
@@ -952,61 +887,7 @@ export default function PuttingPage() {
     });
   }
 
-  function submittedCountForRound(roundNum) {
-    const cards = Array.isArray(cardsByRound[String(roundNum)])
-      ? cardsByRound[String(roundNum)]
-      : [];
-    const sub = submitted?.[String(roundNum)] || {};
-    const count = cards.filter((c) => !!sub?.[c.id]).length;
-    return { submitted: count, total: cards.length };
-  }
-
-  function allCardsSubmittedForRound(roundNum) {
-    const { submitted: s, total: t } = submittedCountForRound(roundNum);
-    return t > 0 && s === t;
-  }
-
-  function missingCardsForRound(roundNum) {
-    const cards = Array.isArray(cardsByRound[String(roundNum)])
-      ? cardsByRound[String(roundNum)]
-      : [];
-    const sub = submitted?.[String(roundNum)] || {};
-    return cards.filter((c) => !sub?.[c.id]);
-  }
-
   async function finalizeScores() {
-    // Sequential: allow finalize when everyone (checked-in) has completed all rounds AND no unsubmitted runs exist
-    if (isSequential) {
-      if (!settings.locked) return alert("League hasn't started yet.");
-
-      const unsubmitted = seqUnsubmittedRuns();
-      if (unsubmitted.length > 0) {
-        return alert(
-          `Cannot finalize yet.\n\nThere are unsubmitted cards: ${unsubmitted
-            .map((r) => r.name)
-            .join(", ")}`
-        );
-      }
-
-      const incomplete = players.filter(
-        (p) => playerCompletedRounds(p.id) < totalRounds
-      );
-      if (incomplete.length > 0) {
-        return alert(
-          `Cannot finalize yet.\n\nWaiting on players to finish ${totalRounds} round(s): ${incomplete
-            .map((p) => p.name)
-            .join(", ")}`
-        );
-      }
-
-      await updatePutting({ settings: { ...settings, finalized: true } });
-      setAdjustOpen(false);
-      setPayoutsOpen(false);
-      alert("Scores finalized. Leaderboards are now locked.");
-      return;
-    }
-
-    // Simultaneous (existing)
     if (!settings.locked || currentRound < 1)
       return alert("League hasn't started yet.");
     if (currentRound !== totalRounds)
@@ -1032,7 +913,7 @@ export default function PuttingPage() {
   async function resetPuttingLeague() {
     await requireAdmin(async () => {
       const ok = window.confirm(
-        "Reset PUTTING league only?\n\nThis clears putting players, cards/scores, sequential cards/scores, settings, leaderboard adjustments, and payout settings.\n(Tag rounds will NOT be affected.)"
+        "Reset PUTTING league only?\n\nThis clears putting players, cards, scores, settings, leaderboard adjustments, and payout settings.\n(Tag rounds will NOT be affected.)"
       );
       if (!ok) return;
 
@@ -1046,6 +927,7 @@ export default function PuttingPage() {
             finalized: false,
             cardMode: "",
             formatMode: "simultaneous",
+            poolMode: "split",
           },
           players: [],
           cardsByRound: {},
@@ -1054,10 +936,6 @@ export default function PuttingPage() {
           adjustments: {},
           payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
           payoutsPosted: {},
-
-          seqRuns: [],
-          seqScoresByRun: {},
-          seqRoundsCompleted: {},
         },
       });
 
@@ -1065,8 +943,6 @@ export default function PuttingPage() {
       setOpenStations({});
       setSelectedForCard([]);
       setCardName("");
-      setSeqSelected([]);
-      setSeqRunName("");
       setName("");
       setPool("A");
       setSetupOpen(false);
@@ -1089,10 +965,7 @@ export default function PuttingPage() {
     if (finalized) return;
 
     await requireAdmin(async () => {
-      const base = isSequential
-        ? seqCumulativeBaseTotalForPlayer(playerId)
-        : cumulativeBaseTotalForPlayer(playerId);
-
+      const base = cumulativeBaseTotalForPlayer(playerId);
       const desired = Number(desiredFinalTotal);
       if (Number.isNaN(desired)) return;
 
@@ -1110,12 +983,11 @@ export default function PuttingPage() {
     });
   }
 
-  // -------- Scorekeeper actions (shared UI helpers) --------
+  // -------- Scorekeeper actions --------
   function toggleStation(stationNum) {
     setOpenStations((prev) => ({ ...prev, [stationNum]: !prev[stationNum] }));
   }
 
-  // -------- Simultaneous scoring --------
   async function setMade(roundNum, stationNum, playerId, made) {
     if (finalized) return;
     if (roundNum !== currentRound)
@@ -1171,186 +1043,17 @@ export default function PuttingPage() {
     alert("Card submitted (locked)!");
   }
 
-  // -------- Sequential: creating + scoring “runs” --------
-  function toggleSeqSelect(playerId) {
-    setSeqSelected((prev) =>
-      prev.includes(playerId)
-        ? prev.filter((x) => x !== playerId)
-        : [...prev, playerId]
-    );
-  }
-
-  function seqPlayerIsInActiveRun(playerId) {
-    return seqRuns.some((r) => r && !r.submitted && (r.playerIds || []).includes(playerId));
-  }
-
-  async function createSequentialRun() {
-    if (finalized) return;
-    if (!settings.locked) {
-      alert('Tap "Begin Round 1 (Lock Format)" first to lock stations/rounds.');
-      return;
-    }
-
-    const count = seqSelected.length;
-    if (count < 2) return alert("Select at least 2 players for a card.");
-    if (count > 4) return alert("Max 4 players per card.");
-
-    // Prevent selecting players already on an active (unsubmitted) run
-    const overlaps = seqSelected.some((pid) => seqPlayerIsInActiveRun(pid));
-    if (overlaps) {
-      return alert(
-        "One or more selected players are already on an active (unsubmitted) card."
-      );
-    }
-
-    // All selected players must be on the same “next round”
-    const nextRounds = seqSelected.map((pid) => nextRoundForPlayer(pid));
-    const unique = Array.from(new Set(nextRounds));
-    if (unique.length !== 1) {
-      return alert(
-        "Selected players are not on the same round.\n\nTip: In sequential mode, players on a card must all be on the same round."
-      );
-    }
-
-    const roundNum = unique[0];
-    if (roundNum > totalRounds) {
-      return alert(
-        `These players have already completed ${totalRounds} round(s).`
-      );
-    }
-
-    const newRun = {
-      id: uid(),
-      name: (seqRunName || "").trim() || `Card ${seqRuns.length + 1}`,
-      playerIds: seqSelected,
-      roundNum,
-      createdAt: Date.now(),
-      submitted: false,
-      submittedAt: null,
-    };
-
-    await updatePutting({
-      seqRuns: [...seqRuns, newRun],
-    });
-
-    setSeqSelected([]);
-    setSeqRunName("");
-    setActiveCardId(newRun.id);
-    setOpenStations({});
-    setCardsOpen(true);
-  }
-
-  async function setMadeSequential(runId, stationNum, playerId, made) {
-    if (finalized) return;
-
-    const run = seqRuns.find((r) => r && r.id === runId);
-    if (!run) return;
-    if (run.submitted) return;
-
-    const path = `puttingLeague.seqScoresByRun.${runId}.${String(
-      stationNum
-    )}.${playerId}`;
-
-    if (made === "" || made === null || made === undefined) {
-      await updateDoc(leagueRef, { [path]: deleteField() });
-      return;
-    }
-
-    const val = clampMade(made);
-    await updateDoc(leagueRef, { [path]: val });
-  }
-
-  function isSequentialRunFullyFilled(run) {
-    const ids = Array.isArray(run?.playerIds) ? run.playerIds : [];
-    if (!ids.length) return false;
-
-    for (let s = 1; s <= stations; s++) {
-      for (const pid of ids) {
-        if (!seqRunRawMadeExists(run.id, s, pid)) return false;
-      }
-    }
-    return true;
-  }
-
-  async function submitSequentialRun(runId) {
-    if (finalized) return;
-
-    const run = seqRuns.find((r) => r && r.id === runId);
-    if (!run) return;
-
-    if (!isSequentialRunFullyFilled(run)) {
-      alert(
-        "This card is missing some scores. Fill all stations for all players."
-      );
-      return;
-    }
-
-    // Increment roundsCompleted for those players
-    const nextRC = { ...(seqRoundsCompleted || {}) };
-    (run.playerIds || []).forEach((pid) => {
-      const done = Number(nextRC[pid] ?? 0);
-      const safe = Number.isNaN(done) ? 0 : done;
-      nextRC[pid] = Math.min(totalRounds, safe + 1);
-    });
-
-    const nextRuns = seqRuns.map((r) =>
-      r.id === runId
-        ? { ...r, submitted: true, submittedAt: Date.now() }
-        : r
-    );
-
-    await updatePutting({
-      seqRuns: nextRuns,
-      seqRoundsCompleted: nextRC,
-    });
-
-    alert("Card submitted (locked) ✅");
-    setActiveCardId("");
-    setOpenStations({});
-  }
-
-  async function deleteSequentialRun(runId) {
-    if (finalized) return;
-
-    await requireAdmin(async () => {
-      const run = seqRuns.find((r) => r && r.id === runId);
-      if (!run) return;
-
-      const ok = window.confirm(
-        `Delete this card?\n\n${run.name}\n(Round ${run.roundNum})\n\nThis does NOT affect any already-submitted rounds.`
-      );
-      if (!ok) return;
-
-      const nextRuns = seqRuns.filter((r) => r && r.id !== runId);
-
-      // Remove any scores stored for this run
-      const scoresPath = `puttingLeague.seqScoresByRun.${runId}`;
-      await updateDoc(leagueRef, { [scoresPath]: deleteField() });
-
-      await updatePutting({ seqRuns: nextRuns });
-
-      if (activeCardId === runId) {
-        setActiveCardId("");
-        setOpenStations({});
-      }
-    });
-  }
-
-  // -------- Leaderboards (by pool, cumulative) --------
-  const leaderboardByPool = useMemo(() => {
-    const pools = { A: [], B: [], C: [] };
+  // -------- Leaderboards (by pool or combined, cumulative) --------
+  const leaderboardGroups = useMemo(() => {
+    // poolsEnabled => {A,B,C}; else => {ALL}
+    const groups = poolsEnabled ? { A: [], B: [], C: [] } : { ALL: [] };
 
     players.forEach((p) => {
-      const base = isSequential
-        ? seqCumulativeBaseTotalForPlayer(p.id)
-        : cumulativeBaseTotalForPlayer(p.id);
-
+      const base = cumulativeBaseTotalForPlayer(p.id);
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
 
       const payoutDollars = Number(payoutsPosted?.[p.id] ?? 0) || 0;
-
-      const throughRound = isSequential ? playerCompletedRounds(p.id) : null;
 
       const row = {
         id: p.id,
@@ -1359,17 +1062,20 @@ export default function PuttingPage() {
         total,
         adj,
         payoutDollars,
-        throughRound, // sequential-only
       };
-      if (p.pool === "B") pools.B.push(row);
-      else if (p.pool === "C") pools.C.push(row);
-      else pools.A.push(row);
+
+      if (!poolsEnabled) {
+        groups.ALL.push(row);
+      } else if (p.pool === "B") groups.B.push(row);
+      else if (p.pool === "C") groups.C.push(row);
+      else groups.A.push(row);
     });
 
-    Object.keys(pools).forEach((k) =>
-      pools[k].sort((a, b) => b.total - a.total)
+    Object.keys(groups).forEach((k) =>
+      groups[k].sort((a, b) => b.total - a.total)
     );
-    return pools;
+
+    return groups;
   }, [
     players,
     scores,
@@ -1377,10 +1083,7 @@ export default function PuttingPage() {
     totalRounds,
     adjustments,
     payoutsPosted,
-    isSequential,
-    seqRuns,
-    seqScoresByRun,
-    seqRoundsCompleted,
+    poolsEnabled,
   ]);
 
   function computeAllPayoutsDollars() {
@@ -1401,18 +1104,61 @@ export default function PuttingPage() {
     if (potAfterFeeDollars <= 0)
       return { ok: false, reason: "Pot after fee is $0." };
 
+    // ✅ If pools are combined, only "pool" payouts make sense.
+    if (!poolsEnabled && mode !== "pool") {
+      return {
+        ok: false,
+        reason:
+          'Pool Mode is "Combined". Switch payout mode to "By Pool" (single leaderboard).',
+      };
+    }
+
+    if (!poolsEnabled) {
+      const rows = (leaderboardGroups.ALL || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      }));
+
+      const places = payoutPlacesForPoolSize(rows.length);
+      const shares = sharesByPoolMode(places);
+      const positionAmounts = allocatePositionAmountsDollars(
+        potAfterFeeDollars,
+        shares
+      );
+      const payouts = computeTieAwarePayoutsForPoolFromAmounts(
+        rows,
+        positionAmounts
+      );
+
+      return {
+        ok: true,
+        payouts,
+        meta: {
+          buyIn,
+          feePct,
+          mode: "pool",
+          totalPotDollars,
+          feeDollars,
+          potAfterFeeDollars,
+          combined: true,
+        },
+      };
+    }
+
+    // ----- Split pools logic (existing) -----
     const pools = {
-      A: (leaderboardByPool.A || []).map((r) => ({
+      A: (leaderboardGroups.A || []).map((r) => ({
         id: r.id,
         total: r.total,
         name: r.name,
       })),
-      B: (leaderboardByPool.B || []).map((r) => ({
+      B: (leaderboardGroups.B || []).map((r) => ({
         id: r.id,
         total: r.total,
         name: r.name,
       })),
-      C: (leaderboardByPool.C || []).map((r) => ({
+      C: (leaderboardGroups.C || []).map((r) => ({
         id: r.id,
         total: r.total,
         name: r.name,
@@ -1570,8 +1316,16 @@ export default function PuttingPage() {
         return;
       }
 
+      // If pools are combined, force payout mode to "pool"
+      const forcedMode = poolsEnabled ? payoutConfig.mode : "pool";
+
       await updatePutting({
-        payoutConfig: { ...payoutConfig, enabled: true, updatedAt: Date.now() },
+        payoutConfig: {
+          ...payoutConfig,
+          enabled: true,
+          mode: forcedMode,
+          updatedAt: Date.now(),
+        },
         payoutsPosted: {},
       });
 
@@ -1581,7 +1335,6 @@ export default function PuttingPage() {
 
   // -------- UI gating --------
   const canBeginNextRound =
-    !isSequential &&
     roundStarted &&
     !finalized &&
     currentRound < totalRounds &&
@@ -1590,25 +1343,19 @@ export default function PuttingPage() {
   const canFinalize =
     roundStarted &&
     !finalized &&
-    (isSequential
-      ? seqUnsubmittedRuns().length === 0 &&
-        players.every((p) => playerCompletedRounds(p.id) >= totalRounds)
-      : currentRound === totalRounds && allCardsSubmittedForRound(currentRound));
+    currentRound === totalRounds &&
+    allCardsSubmittedForRound(currentRound);
 
   const submitStats = roundStarted
-    ? isSequential
-      ? { submitted: seqRuns.filter((r) => r && r.submitted).length, total: seqRuns.length }
-      : submittedCountForRound(currentRound)
+    ? submittedCountForRound(currentRound)
     : { submitted: 0, total: 0 };
 
   const missingCardsThisRound = roundStarted
-    ? isSequential
-      ? seqRuns.filter((r) => r && !r.submitted)
-      : missingCardsForRound(currentRound)
+    ? missingCardsForRound(currentRound)
     : [];
 
   const showCardModeButtons =
-    !isSequential && !roundStarted && !finalized && players.length >= 2;
+    !roundStarted && !finalized && players.length >= 2;
 
   const hasPostedPayouts =
     payoutsEnabled && Object.keys(payoutsPosted || {}).length > 0;
@@ -1656,9 +1403,9 @@ export default function PuttingPage() {
     );
   }
 
-  const formatLabel = isSequential ? "Sequential Stations" : "Simultaneous Stations";
-
   // -------- Render --------
+  const leaderboardKeys = poolsEnabled ? ["A", "B", "C"] : ["ALL"];
+
   return (
     <div
       style={{
@@ -1711,12 +1458,6 @@ export default function PuttingPage() {
             >
               Back to League
             </NavLink>
-
-            <span style={{ opacity: 0.6 }}>•</span>
-
-            <span>
-              Format: <strong>{formatLabel}</strong>
-            </span>
           </div>
 
           <div
@@ -1730,11 +1471,7 @@ export default function PuttingPage() {
             Putting League{" "}
             {roundStarted ? (
               <span style={{ color: COLORS.navy }}>
-                {isSequential
-                  ? `— In progress (${stations} station${
-                      stations === 1 ? "" : "s"
-                    } • ${totalRounds} round${totalRounds === 1 ? "" : "s"})`
-                  : `— Round ${currentRound} of ${totalRounds}`}
+                — Round {currentRound} of {totalRounds}
               </span>
             ) : (
               <span style={{ opacity: 0.75, fontWeight: 800 }}>
@@ -1748,26 +1485,14 @@ export default function PuttingPage() {
             ) : null}
           </div>
 
-          {/* Admin status */}
+          {/* Admin status (who hasn't submitted) */}
           {roundStarted && (
             <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 14 }}>
               <div>
-                Admin Status:{" "}
-                {isSequential ? (
-                  <>
-                    Cards submitted —{" "}
-                    <strong>
-                      {submitStats.submitted} / {submitStats.total}
-                    </strong>
-                  </>
-                ) : (
-                  <>
-                    Cards submitted this round —{" "}
-                    <strong>
-                      {submitStats.submitted} / {submitStats.total}
-                    </strong>
-                  </>
-                )}
+                Admin Status: Cards submitted this round —{" "}
+                <strong>
+                  {submitStats.submitted} / {submitStats.total}
+                </strong>
               </div>
 
               {missingCardsThisRound.length > 0 ? (
@@ -1819,7 +1544,7 @@ export default function PuttingPage() {
             {setupOpen && (
               <div style={{ marginTop: 10 }}>
                 <div style={{ display: "grid", gap: 10 }}>
-                  {/* Format toggle (only before lock) */}
+                  {/* FORMAT MODE (Simultaneous / Sequential) */}
                   <div>
                     <div
                       style={{
@@ -1829,36 +1554,94 @@ export default function PuttingPage() {
                         marginBottom: 6,
                       }}
                     >
-                      Format Mode
+                      Station Format
                     </div>
-                    <select
-                      value={formatMode}
-                      disabled={settings.locked || finalized}
-                      onChange={(e) =>
-                        updatePutting({
-                          settings: {
-                            ...settings,
-                            formatMode:
-                              e.target.value === "sequential"
-                                ? "sequential"
-                                : "simultaneous",
-                          },
-                        })
-                      }
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                        background: "#fff",
-                      }}
-                      title="Only changeable before you begin (lock format)."
-                    >
-                      <option value="simultaneous">Simultaneous Stations</option>
-                      <option value="sequential">Sequential Stations</option>
-                    </select>
+                    <div style={pillRowStyle}>
+                      <button
+                        disabled={settings.locked || finalized}
+                        onClick={() =>
+                          updatePutting({
+                            settings: {
+                              ...settings,
+                              formatMode: "simultaneous",
+                            },
+                          })
+                        }
+                        style={pillStyle(formatMode === "simultaneous")}
+                        title="All cards play together by round (current behavior)."
+                      >
+                        Simultaneous Stations
+                      </button>
+                      <button
+                        disabled={settings.locked || finalized}
+                        onClick={() =>
+                          updatePutting({
+                            settings: { ...settings, formatMode: "sequential" },
+                          })
+                        }
+                        style={pillStyle(formatMode === "sequential")}
+                        title="Cards can run through stations as they form (sequential mode)."
+                      >
+                        Sequential Stations
+                      </button>
+                    </div>
                     <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                      {formatMode === "simultaneous"
-                        ? "Everyone is checked in first. Round 1 cards are created, then all cards play the same round together."
-                        : "Players can check in continuously. Admin creates cards as players arrive. Each player shows “through round X” on the leaderboard."}
+                      {settings.locked || finalized
+                        ? "Format is locked once Round 1 begins."
+                        : "Choose format before beginning Round 1."}
+                    </div>
+                  </div>
+
+                  {/* POOL MODE (Split / Combined) */}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 900,
+                        color: COLORS.navy,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Pool Mode
+                    </div>
+                    <div style={pillRowStyle}>
+                      <button
+                        disabled={settings.locked || finalized}
+                        onClick={async () => {
+                          await updatePutting({
+                            settings: { ...settings, poolMode: "split" },
+                          });
+                        }}
+                        style={pillStyle(poolMode === "split")}
+                        title="Separate A/B/C leaderboards. Pool selection required at check-in."
+                      >
+                        Split Pool
+                      </button>
+                      <button
+                        disabled={settings.locked || finalized}
+                        onClick={async () => {
+                          // If combined, force payout mode to "pool"
+                          const nextPayout =
+                            payoutConfig.mode === "collective"
+                              ? { ...payoutConfig, mode: "pool" }
+                              : { ...payoutConfig };
+
+                          await updatePutting({
+                            settings: { ...settings, poolMode: "combined" },
+                            payoutConfig: nextPayout,
+                            payoutsPosted: {},
+                          });
+                        }}
+                        style={pillStyle(poolMode === "combined")}
+                        title="Single combined leaderboard. Pool selection removed at check-in."
+                      >
+                        Combined Pool
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
+                      {poolMode === "combined"
+                        ? "Combined Pool = one leaderboard. Payout mode is limited to “By Pool” (single pool)."
+                        : "Split Pool = A/B/C leaderboards and pool-aware payouts."}
                     </div>
                   </div>
 
@@ -1890,7 +1673,7 @@ export default function PuttingPage() {
                         background: "#fff",
                       }}
                     >
-                      {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                      {Array.from({ length: 18 }, (_, i) => i + 1).map((n) => (
                         <option key={n} value={n}>
                           {n}
                         </option>
@@ -1945,9 +1728,9 @@ export default function PuttingPage() {
                         border: `1px solid ${COLORS.green}`,
                       }}
                       disabled={finalized}
-                      title="Requires admin password. Locks format and begins."
+                      title="Requires admin password. Locks format and begins Round 1."
                     >
-                      Begin (Lock Format)
+                      Begin Round 1 (Lock Format)
                     </button>
                   ) : (
                     <div style={{ fontSize: 12, opacity: 0.75 }}>
@@ -1981,11 +1764,7 @@ export default function PuttingPage() {
                         color: "white",
                         border: `1px solid ${COLORS.red}`,
                       }}
-                      title={
-                        isSequential
-                          ? "Finalize is available once all players have completed all rounds and all cards are submitted."
-                          : "Only available after all cards submit on the final round."
-                      }
+                      title="No password required. Only available after all cards submit on final round."
                     >
                       Finalize Scores (Lock)
                     </button>
@@ -2041,6 +1820,7 @@ export default function PuttingPage() {
                                 payoutConfig: {
                                   ...DEFAULT_PAYOUT_CONFIG,
                                   enabled: true,
+                                  mode: poolsEnabled ? "pool" : "pool",
                                 },
                                 payoutsPosted: {},
                               });
@@ -2175,18 +1955,48 @@ export default function PuttingPage() {
                                   e.target.value
                                 )
                               }
+                              disabled={!poolsEnabled}
                               style={{
                                 ...inputStyle,
                                 width: "100%",
                                 background: "#fff",
                                 marginTop: 6,
+                                opacity: poolsEnabled ? 1 : 0.6,
                               }}
+                              title={
+                                poolsEnabled
+                                  ? "Choose payout mode."
+                                  : 'Disabled because Pool Mode is "Combined".'
+                              }
                             >
                               <option value="">Select mode…</option>
-                              <option value="pool">By Pool</option>
-                              <option value="collective">Collective</option>
+                              <option value="pool">
+                                {poolsEnabled
+                                  ? "By Pool"
+                                  : "By Pool (single leaderboard)"}
+                              </option>
+                              {poolsEnabled ? (
+                                <option value="collective">Collective</option>
+                              ) : null}
                             </select>
                           </label>
+
+                          {!poolsEnabled && (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                opacity: 0.8,
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                border: `1px solid ${COLORS.border}`,
+                                background: COLORS.soft,
+                              }}
+                            >
+                              Pool Mode is <strong>Combined</strong>, so payouts
+                              are computed on the single leaderboard using{" "}
+                              <strong>By Pool</strong> rules.
+                            </div>
+                          )}
 
                           <button
                             onClick={() =>
@@ -2201,15 +2011,20 @@ export default function PuttingPage() {
                                   0,
                                   50
                                 );
-                                const modeOk =
+
+                                let modeOk =
                                   payoutConfig?.mode === "pool" ||
                                   payoutConfig?.mode === "collective"
                                     ? payoutConfig.mode
                                     : "";
 
+                                if (!poolsEnabled) modeOk = "pool";
+
                                 if (!modeOk) {
                                   alert(
-                                    'Select a payout mode ("By Pool" or "Collective").'
+                                    poolsEnabled
+                                      ? 'Select a payout mode ("By Pool" or "Collective").'
+                                      : 'Payout mode is fixed to "By Pool" in Combined Pool mode.'
                                   );
                                   return;
                                 }
@@ -2287,7 +2102,9 @@ export default function PuttingPage() {
                             50
                           )}% fee • ${
                             payoutConfig.mode === "pool"
-                              ? "By Pool"
+                              ? poolsEnabled
+                                ? "By Pool"
+                                : "By Pool (Combined)"
                               : "Collective"
                           }`}
                         </strong>
@@ -2327,9 +2144,7 @@ export default function PuttingPage() {
 
                       <div style={{ display: "grid", gap: 8 }}>
                         {players.map((p) => {
-                          const base = isSequential
-                            ? seqCumulativeBaseTotalForPlayer(p.id)
-                            : cumulativeBaseTotalForPlayer(p.id);
+                          const base = cumulativeBaseTotalForPlayer(p.id);
                           const adj = Number(adjustments?.[p.id] ?? 0) || 0;
                           const total = base + adj;
 
@@ -2355,25 +2170,17 @@ export default function PuttingPage() {
                                   }}
                                 >
                                   {p.name}{" "}
-                                  <span style={{ fontSize: 12, opacity: 0.7 }}>
-                                    (
-                                    {p.pool === "B"
-                                      ? "B"
-                                      : p.pool === "C"
-                                      ? "C"
-                                      : "A"}{" "}
-                                    Pool)
-                                  </span>
-                                  {isSequential ? (
+                                  {poolsEnabled ? (
                                     <span
-                                      style={{
-                                        fontSize: 12,
-                                        opacity: 0.7,
-                                        marginLeft: 8,
-                                      }}
+                                      style={{ fontSize: 12, opacity: 0.7 }}
                                     >
-                                      • through round{" "}
-                                      <strong>{playerCompletedRounds(p.id)}</strong>
+                                      (
+                                      {p.pool === "B"
+                                        ? "B"
+                                        : p.pool === "C"
+                                        ? "C"
+                                        : "A"}{" "}
+                                      Pool)
                                     </span>
                                   ) : null}
                                 </div>
@@ -2407,7 +2214,10 @@ export default function PuttingPage() {
                                   type="number"
                                   value={String(total)}
                                   onChange={(e) =>
-                                    setFinalLeaderboardTotal(p.id, e.target.value)
+                                    setFinalLeaderboardTotal(
+                                      p.id,
+                                      e.target.value
+                                    )
                                   }
                                   style={{
                                     ...inputStyle,
@@ -2456,7 +2266,7 @@ export default function PuttingPage() {
           </div>
 
           {/* CHECK-IN */}
-          {(!roundStarted || isSequential) && !finalized && (
+          {!roundStarted && (
             <div
               style={{
                 border: `1px solid ${COLORS.border}`,
@@ -2502,16 +2312,24 @@ export default function PuttingPage() {
                       style={{ ...inputStyle, width: 240 }}
                       disabled={finalized}
                     />
-                    <select
-                      value={pool}
-                      onChange={(e) => setPool(e.target.value)}
-                      style={{ ...inputStyle, width: 140, background: "#fff" }}
-                      disabled={finalized}
-                    >
-                      <option value="A">A Pool</option>
-                      <option value="B">B Pool</option>
-                      <option value="C">C Pool</option>
-                    </select>
+
+                    {poolsEnabled ? (
+                      <select
+                        value={pool}
+                        onChange={(e) => setPool(e.target.value)}
+                        style={{
+                          ...inputStyle,
+                          width: 140,
+                          background: "#fff",
+                        }}
+                        disabled={finalized}
+                      >
+                        <option value="A">A Pool</option>
+                        <option value="B">B Pool</option>
+                        <option value="C">C Pool</option>
+                      </select>
+                    ) : null}
+
                     <button
                       onClick={addPlayer}
                       style={{
@@ -2525,6 +2343,13 @@ export default function PuttingPage() {
                       Add
                     </button>
                   </div>
+
+                  {!poolsEnabled && (
+                    <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+                      Pool Mode is <strong>Combined</strong> — only player names
+                      are needed.
+                    </div>
+                  )}
 
                   {players.length ? (
                     <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
@@ -2544,26 +2369,22 @@ export default function PuttingPage() {
                         >
                           <div style={{ fontWeight: 900, color: COLORS.text }}>
                             {p.name}
-                            {isSequential && settings.locked ? (
-                              <span style={{ fontSize: 12, opacity: 0.7, marginLeft: 8 }}>
-                                • through round{" "}
-                                <strong>{playerCompletedRounds(p.id)}</strong>
-                              </span>
-                            ) : null}
                           </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              color: COLORS.navy,
-                            }}
-                          >
-                            {p.pool === "B"
-                              ? "B Pool"
-                              : p.pool === "C"
-                              ? "C Pool"
-                              : "A Pool"}
-                          </div>
+                          {poolsEnabled ? (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                color: COLORS.navy,
+                              }}
+                            >
+                              {p.pool === "B"
+                                ? "B Pool"
+                                : p.pool === "C"
+                                ? "C Pool"
+                                : "A Pool"}
+                            </div>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -2665,9 +2486,7 @@ export default function PuttingPage() {
               }}
             >
               <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                {isSequential
-                  ? "Cards (Sequential)"
-                  : `Cards — Round ${currentRound || 1}`}
+                Cards — Round {currentRound || 1}
               </div>
               <div style={{ fontSize: 12, opacity: 0.75 }}>
                 {cardsOpen ? "Tap to collapse" : "Tap to expand"}
@@ -2676,132 +2495,102 @@ export default function PuttingPage() {
 
             {cardsOpen && (
               <div style={{ marginTop: 10 }}>
-                {/* SEQUENTIAL mode: create runs anytime after lock */}
-                {isSequential ? (
+                {!roundStarted && cardMode === "manual" ? (
                   <>
-                    {!settings.locked ? (
-                      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-                        Set Stations/Rounds and choose <strong>Sequential Stations</strong>, then tap{" "}
-                        <strong>Begin (Lock Format)</strong>.
-                      </div>
-                    ) : !finalized ? (
+                    <div
+                      style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
+                    >
+                      Create Round 1 cards (2–4 players).
+                    </div>
+
+                    <div
+                      style={{
+                        border: `1px solid ${COLORS.border}`,
+                        background: "#fff",
+                        borderRadius: 12,
+                        padding: 10,
+                        marginBottom: 10,
+                      }}
+                    >
                       <div
                         style={{
-                          border: `1px solid ${COLORS.border}`,
-                          background: "#fff",
-                          borderRadius: 12,
-                          padding: 10,
+                          display: "flex",
+                          gap: 10,
+                          flexWrap: "wrap",
+                          alignItems: "center",
                           marginBottom: 10,
                         }}
                       >
-                        <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 10 }}>
-                          Create a card from checked-in players (2–4). Players on a card must be on the same “next round”.
-                        </div>
-
-                        <div
+                        <input
+                          placeholder="Card name (optional)"
+                          value={cardName}
+                          onChange={(e) => setCardName(e.target.value)}
+                          style={{ ...inputStyle, width: 240 }}
+                          disabled={finalized}
+                        />
+                        <button
+                          onClick={createCard}
                           style={{
-                            display: "flex",
-                            gap: 10,
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                            marginBottom: 10,
+                            ...smallButtonStyle,
+                            background: COLORS.navy,
+                            color: "white",
+                            border: `1px solid ${COLORS.navy}`,
                           }}
+                          disabled={finalized}
                         >
-                          <input
-                            placeholder="Card name (optional)"
-                            value={seqRunName}
-                            onChange={(e) => setSeqRunName(e.target.value)}
-                            style={{ ...inputStyle, width: 240 }}
-                            disabled={finalized}
-                          />
-                          <button
-                            onClick={createSequentialRun}
-                            style={{
-                              ...smallButtonStyle,
-                              background: COLORS.navy,
-                              color: "white",
-                              border: `1px solid ${COLORS.navy}`,
-                            }}
-                            disabled={finalized}
-                          >
-                            Create Card
-                          </button>
+                          Create Card
+                        </button>
 
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            Selected: <strong>{seqSelected.length}</strong> / 4
-                            <span style={{ marginLeft: 8 }}>(min 2)</span>
-                          </div>
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          Selected: <strong>{selectedForCard.length}</strong> /
+                          4<span style={{ marginLeft: 8 }}>(min 2)</span>
                         </div>
+                      </div>
 
-                        <div style={{ display: "grid", gap: 8 }}>
-                          {players.map((p) => {
-                            const isSelected = seqSelected.includes(p.id);
-                            const active = seqPlayerIsInActiveRun(p.id);
-                            const done = playerCompletedRounds(p.id);
-                            const nextR = nextRoundForPlayer(p.id);
-                            const finishedAll = done >= totalRounds;
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {players.map((p) => {
+                          const isSelected = selectedForCard.includes(p.id);
+                          const already = r1Cards.some((c) =>
+                            (c.playerIds || []).includes(p.id)
+                          );
 
-                            return (
-                              <label
-                                key={p.id}
+                          return (
+                            <label
+                              key={p.id}
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                gap: 10,
+                                padding: "10px 12px",
+                                borderRadius: 12,
+                                border: `1px solid ${COLORS.border}`,
+                                background: already ? "#fafafa" : COLORS.soft,
+                                opacity: already ? 0.6 : 1,
+                                cursor: already ? "not-allowed" : "pointer",
+                              }}
+                            >
+                              <div
                                 style={{
                                   display: "flex",
-                                  justifyContent: "space-between",
                                   alignItems: "center",
                                   gap: 10,
-                                  padding: "10px 12px",
-                                  borderRadius: 12,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: active || finishedAll ? "#fafafa" : COLORS.soft,
-                                  opacity: active || finishedAll ? 0.6 : 1,
-                                  cursor: active || finishedAll ? "not-allowed" : "pointer",
                                 }}
                               >
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 10,
-                                    minWidth: 0,
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    disabled={active || finishedAll || finalized}
-                                    onChange={() => toggleSeqSelect(p.id)}
-                                  />
-                                  <div style={{ fontWeight: 900, minWidth: 0 }}>
-                                    <div
-                                      style={{
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {p.name}
-                                      <span style={{ fontSize: 12, opacity: 0.75, marginLeft: 8 }}>
-                                        • through round <strong>{done}</strong>
-                                        {done < totalRounds ? (
-                                          <span style={{ marginLeft: 8 }}>
-                                            (next: R{nextR})
-                                          </span>
-                                        ) : (
-                                          <span style={{ marginLeft: 8 }}>
-                                            (done)
-                                          </span>
-                                        )}
-                                      </span>
-                                    </div>
-                                  </div>
-                                </div>
-
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  disabled={already || finalized}
+                                  onChange={() => toggleSelectForCard(p.id)}
+                                />
+                                <div style={{ fontWeight: 900 }}>{p.name}</div>
+                              </div>
+                              {poolsEnabled ? (
                                 <div
                                   style={{
                                     fontSize: 12,
                                     fontWeight: 900,
                                     color: COLORS.navy,
-                                    whiteSpace: "nowrap",
                                   }}
                                 >
                                   {p.pool === "B"
@@ -2810,307 +2599,92 @@ export default function PuttingPage() {
                                     ? "C Pool"
                                     : "A Pool"}
                                 </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {/* List of sequential runs */}
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {seqRuns.length === 0 ? (
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                          No cards created yet.
-                        </div>
-                      ) : (
-                        seqRuns
-                          .slice()
-                          .sort((a, b) => {
-                            const as = a?.submitted ? 1 : 0;
-                            const bs = b?.submitted ? 1 : 0;
-                            if (as !== bs) return as - bs; // unsubmitted first
-                            return (a?.createdAt || 0) - (b?.createdAt || 0);
-                          })
-                          .map((r) => (
-                            <div
-                              key={r.id}
-                              style={{
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: `1px solid ${COLORS.border}`,
-                                background: "#fff",
-                              }}
-                            >
-                              <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                {r.name}
-                                <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.75 }}>
-                                  (Round {r.roundNum})
-                                </span>
-                                <span
-                                  style={{
-                                    marginLeft: 8,
-                                    fontSize: 12,
-                                    opacity: 0.75,
-                                    color: r.submitted ? COLORS.green : COLORS.red,
-                                    fontWeight: 900,
-                                  }}
-                                >
-                                  {r.submitted ? "✓ submitted" : "not submitted"}
-                                </span>
-                              </div>
-
-                              <div style={{ marginTop: 6, fontSize: 14 }}>
-                                {(r.playerIds || []).map((pid) => {
-                                  const p = playerById[pid];
-                                  if (!p) return null;
-                                  return (
-                                    <div
-                                      key={pid}
-                                      style={{
-                                        display: "flex",
-                                        justifyContent: "space-between",
-                                      }}
-                                    >
-                                      <span style={{ fontWeight: 800 }}>{p.name}</span>
-                                      <span
-                                        style={{
-                                          fontSize: 12,
-                                          fontWeight: 900,
-                                          color: COLORS.navy,
-                                        }}
-                                      >
-                                        {p.pool === "B"
-                                          ? "B Pool"
-                                          : p.pool === "C"
-                                          ? "C Pool"
-                                          : "A Pool"}
-                                      </span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-
-                              {!r.submitted && !finalized ? (
-                                <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
-                                  <button
-                                    onClick={() => {
-                                      setActiveCardId(r.id);
-                                      setOpenStations({});
-                                      window.scrollTo(0, 0);
-                                    }}
-                                    style={{
-                                      ...smallButtonStyle,
-                                      background: COLORS.navy,
-                                      color: "white",
-                                      border: `1px solid ${COLORS.navy}`,
-                                      flex: 1,
-                                    }}
-                                  >
-                                    Score This Card
-                                  </button>
-
-                                  <button
-                                    onClick={() => deleteSequentialRun(r.id)}
-                                    style={{
-                                      ...smallButtonStyle,
-                                      background: "#fff",
-                                      border: `1px solid ${COLORS.border}`,
-                                      color: COLORS.red,
-                                      fontWeight: 900,
-                                    }}
-                                    title="Requires admin password"
-                                  >
-                                    Delete
-                                  </button>
-                                </div>
                               ) : null}
-                            </div>
-                          ))
-                      )}
+                            </label>
+                          );
+                        })}
+                      </div>
                     </div>
                   </>
-                ) : (
-                  /* SIMULTANEOUS mode (existing) */
-                  <>
-                    {!roundStarted && cardMode === "manual" ? (
-                      <>
-                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
-                          Create Round 1 cards (2–4 players). Pools can be mixed.
-                        </div>
+                ) : roundStarted && currentRound >= 2 ? (
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
+                    Cards for Round {currentRound} are auto-created based on
+                    Round {currentRound - 1} totals.
+                  </div>
+                ) : !roundStarted ? (
+                  <div
+                    style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}
+                  >
+                    Choose Manual or Random cards above. Round 1 requires all
+                    players be assigned to cards before starting.
+                  </div>
+                ) : null}
 
-                        <div
-                          style={{
-                            border: `1px solid ${COLORS.border}`,
-                            background: "#fff",
-                            borderRadius: 12,
-                            padding: 10,
-                            marginBottom: 10,
-                          }}
-                        >
-                          <div
+                <div style={{ display: "grid", gap: 8 }}>
+                  {(Array.isArray(cardsByRound[String(currentRound || 1)])
+                    ? cardsByRound[String(currentRound || 1)]
+                    : []
+                  ).map((c) => (
+                    <div
+                      key={c.id}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        border: `1px solid ${COLORS.border}`,
+                        background: "#fff",
+                      }}
+                    >
+                      <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                        {c.name}
+                        {roundStarted && currentRound ? (
+                          <span
                             style={{
-                              display: "flex",
-                              gap: 10,
-                              flexWrap: "wrap",
-                              alignItems: "center",
-                              marginBottom: 10,
+                              marginLeft: 8,
+                              fontSize: 12,
+                              opacity: 0.75,
                             }}
                           >
-                            <input
-                              placeholder="Card name (optional)"
-                              value={cardName}
-                              onChange={(e) => setCardName(e.target.value)}
-                              style={{ ...inputStyle, width: 240 }}
-                              disabled={finalized}
-                            />
-                            <button
-                              onClick={createCard}
+                            {submitted?.[String(currentRound)]?.[c.id]
+                              ? "✓ submitted"
+                              : "not submitted"}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 14 }}>
+                        {(c.playerIds || []).map((pid) => {
+                          const p = playerById[pid];
+                          if (!p) return null;
+                          return (
+                            <div
+                              key={pid}
                               style={{
-                                ...smallButtonStyle,
-                                background: COLORS.navy,
-                                color: "white",
-                                border: `1px solid ${COLORS.navy}`,
+                                display: "flex",
+                                justifyContent: "space-between",
                               }}
-                              disabled={finalized}
                             >
-                              Create Card
-                            </button>
-
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>
-                              Selected: <strong>{selectedForCard.length}</strong> / 4
-                              <span style={{ marginLeft: 8 }}>(min 2)</span>
+                              <span style={{ fontWeight: 800 }}>{p.name}</span>
+                              {poolsEnabled ? (
+                                <span
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: 900,
+                                    color: COLORS.navy,
+                                  }}
+                                >
+                                  {p.pool === "B"
+                                    ? "B Pool"
+                                    : p.pool === "C"
+                                    ? "C Pool"
+                                    : "A Pool"}
+                                </span>
+                              ) : null}
                             </div>
-                          </div>
-
-                          <div style={{ display: "grid", gap: 8 }}>
-                            {players.map((p) => {
-                              const isSelected = selectedForCard.includes(p.id);
-                              const already = r1Cards.some((c) =>
-                                (c.playerIds || []).includes(p.id)
-                              );
-
-                              return (
-                                <label
-                                  key={p.id}
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                    gap: 10,
-                                    padding: "10px 12px",
-                                    borderRadius: 12,
-                                    border: `1px solid ${COLORS.border}`,
-                                    background: already ? "#fafafa" : COLORS.soft,
-                                    opacity: already ? 0.6 : 1,
-                                    cursor: already ? "not-allowed" : "pointer",
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: 10,
-                                    }}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      disabled={already || finalized}
-                                      onChange={() => toggleSelectForCard(p.id)}
-                                    />
-                                    <div style={{ fontWeight: 900 }}>{p.name}</div>
-                                  </div>
-                                  <div
-                                    style={{
-                                      fontSize: 12,
-                                      fontWeight: 900,
-                                      color: COLORS.navy,
-                                    }}
-                                  >
-                                    {p.pool === "B"
-                                      ? "B Pool"
-                                      : p.pool === "C"
-                                      ? "C Pool"
-                                      : "A Pool"}
-                                  </div>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </>
-                    ) : roundStarted && currentRound >= 2 ? (
-                      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
-                        Cards for Round {currentRound} are auto-created based on Round{" "}
-                        {currentRound - 1} totals.
+                          );
+                        })}
                       </div>
-                    ) : !roundStarted ? (
-                      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-                        Choose Manual or Random cards above. Round 1 requires all players
-                        be assigned to cards before starting.
-                      </div>
-                    ) : null}
-
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {(Array.isArray(cardsByRound[String(currentRound || 1)])
-                        ? cardsByRound[String(currentRound || 1)]
-                        : []
-                      ).map((c) => (
-                        <div
-                          key={c.id}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "#fff",
-                          }}
-                        >
-                          <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                            {c.name}
-                            {roundStarted && currentRound ? (
-                              <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.75 }}>
-                                {submitted?.[String(currentRound)]?.[c.id]
-                                  ? "✓ submitted"
-                                  : "not submitted"}
-                              </span>
-                            ) : null}
-                          </div>
-                          <div style={{ marginTop: 6, fontSize: 14 }}>
-                            {(c.playerIds || []).map((pid) => {
-                              const p = playerById[pid];
-                              if (!p) return null;
-                              return (
-                                <div
-                                  key={pid}
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                  }}
-                                >
-                                  <span style={{ fontWeight: 800 }}>{p.name}</span>
-                                  <span
-                                    style={{
-                                      fontSize: 12,
-                                      fontWeight: 900,
-                                      color: COLORS.navy,
-                                    }}
-                                  >
-                                    {p.pool === "B"
-                                      ? "B Pool"
-                                      : p.pool === "C"
-                                      ? "C Pool"
-                                      : "A Pool"}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ))}
                     </div>
-                  </>
-                )}
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -3127,7 +2701,9 @@ export default function PuttingPage() {
                 marginBottom: 12,
               }}
             >
-              <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}>
+              <div
+                style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}
+              >
                 Scorekeeper
               </div>
 
@@ -3148,20 +2724,11 @@ export default function PuttingPage() {
                   style={{ ...inputStyle, width: 280, background: "#fff" }}
                 >
                   <option value="">Select your card…</option>
-
-                  {isSequential
-                    ? seqRuns
-                        .filter((r) => r && !r.submitted)
-                        .map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {r.name} (R{r.roundNum})
-                          </option>
-                        ))
-                    : currentCards.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
+                  {currentCards.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
                 </select>
 
                 {activeCardId ? (
@@ -3178,121 +2745,140 @@ export default function PuttingPage() {
               </div>
 
               {activeCardId ? (
-                isSequential ? (
-                  (() => {
-                    const run = seqRuns.find((r) => r && r.id === activeCardId);
-                    if (!run) return null;
+                (() => {
+                  const card = currentCards.find((c) => c.id === activeCardId);
+                  if (!card) return null;
 
-                    const cardPlayers = (run.playerIds || [])
-                      .map((pid) => playerById[pid])
-                      .filter(Boolean);
+                  const cardPlayers = (card.playerIds || [])
+                    .map((pid) => playerById[pid])
+                    .filter(Boolean);
+                  const alreadySubmitted =
+                    !!submitted?.[String(currentRound)]?.[card.id];
 
-                    const alreadySubmitted = !!run.submitted;
+                  return (
+                    <div style={{ marginTop: 14 }}>
+                      <div
+                        style={{
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                          marginBottom: 10,
+                        }}
+                      >
+                        {card.name}{" "}
+                        {alreadySubmitted ? (
+                          <span style={{ color: COLORS.green, marginLeft: 8 }}>
+                            (submitted)
+                          </span>
+                        ) : (
+                          <span style={{ opacity: 0.6, marginLeft: 8 }}>
+                            (in progress)
+                          </span>
+                        )}
+                      </div>
 
-                    return (
-                      <div style={{ marginTop: 14 }}>
-                        <div
-                          style={{
-                            fontWeight: 900,
-                            color: COLORS.navy,
-                            marginBottom: 10,
-                          }}
-                        >
-                          {run.name}{" "}
-                          <span style={{ fontSize: 12, opacity: 0.75 }}>
-                            (Round {run.roundNum})
-                          </span>{" "}
-                          {alreadySubmitted ? (
-                            <span style={{ color: COLORS.green, marginLeft: 8 }}>
-                              (submitted)
-                            </span>
-                          ) : (
-                            <span style={{ opacity: 0.6, marginLeft: 8 }}>
-                              (in progress)
-                            </span>
-                          )}
-                        </div>
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {Array.from({ length: stations }, (_, i) => i + 1).map(
+                          (stNum) => {
+                            const open = !!openStations[stNum];
 
-                        <div style={{ display: "grid", gap: 10 }}>
-                          {Array.from({ length: stations }, (_, i) => i + 1).map(
-                            (stNum) => {
-                              const open = !!openStations[stNum];
+                            const stationRows = cardPlayers.map((p) => {
+                              const made = madeFor(currentRound, stNum, p.id);
+                              return {
+                                id: p.id,
+                                name: p.name,
+                                pool: p.pool,
+                                made,
+                                pts: pointsForMade(made ?? 0),
+                              };
+                            });
 
-                              const stationRows = cardPlayers.map((p) => {
-                                const made = seqRunScoreMade(run.id, stNum, p.id);
-                                return {
-                                  id: p.id,
-                                  name: p.name,
-                                  pool: p.pool,
-                                  made,
-                                  pts: pointsForMade(made ?? 0),
-                                };
-                              });
-
-                              return (
+                            return (
+                              <div
+                                key={stNum}
+                                style={{
+                                  border: `1px solid ${COLORS.border}`,
+                                  borderRadius: 14,
+                                  background: COLORS.soft,
+                                  overflow: "hidden",
+                                }}
+                              >
                                 <div
-                                  key={stNum}
+                                  onClick={() => toggleStation(stNum)}
                                   style={{
-                                    border: `1px solid ${COLORS.border}`,
-                                    borderRadius: 14,
-                                    background: COLORS.soft,
-                                    overflow: "hidden",
+                                    padding: "12px 12px",
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    gap: 10,
                                   }}
                                 >
                                   <div
-                                    onClick={() => toggleStation(stNum)}
                                     style={{
-                                      padding: "12px 12px",
-                                      cursor: "pointer",
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      alignItems: "center",
-                                      gap: 10,
+                                      fontWeight: 900,
+                                      color: COLORS.navy,
                                     }}
                                   >
-                                    <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                      Station {stNum}
-                                    </div>
-                                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                      {open ? "Tap to collapse" : "Tap to expand"}
-                                    </div>
+                                    Station {stNum}
                                   </div>
+                                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                    {open ? "Tap to collapse" : "Tap to expand"}
+                                  </div>
+                                </div>
 
-                                  {open && (
-                                    <div style={{ padding: 12, background: "#fff" }}>
-                                      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-                                        Blank means “not entered yet.” (4=5pts, 3=3pts, 2=2pts, 1=1pt, 0=0)
-                                      </div>
+                                {open && (
+                                  <div
+                                    style={{ padding: 12, background: "#fff" }}
+                                  >
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        opacity: 0.75,
+                                        marginBottom: 10,
+                                      }}
+                                    >
+                                      Blank means “not entered yet.” (4=5pts,
+                                      3=3pts, 2=2pts, 1=1pt, 0=0)
+                                    </div>
 
-                                      <div style={{ display: "grid", gap: 8 }}>
-                                        {stationRows.map((row) => (
-                                          <div
-                                            key={row.id}
-                                            style={{
-                                              display: "grid",
-                                              gridTemplateColumns: "1fr auto auto",
-                                              alignItems: "center",
-                                              gap: 10,
-                                              padding: "10px 12px",
-                                              borderRadius: 12,
-                                              border: `1px solid ${COLORS.border}`,
-                                              background: COLORS.soft,
-                                              opacity: alreadySubmitted ? 0.75 : 1,
-                                              minWidth: 0,
-                                            }}
-                                          >
-                                            <div style={{ minWidth: 0 }}>
-                                              <div
-                                                style={{
-                                                  fontWeight: 900,
-                                                  color: COLORS.text,
-                                                  overflow: "hidden",
-                                                  textOverflow: "ellipsis",
-                                                  whiteSpace: "nowrap",
-                                                }}
-                                              >
-                                                {row.name}{" "}
-                                                <span style={{ fontSize: 12, opacity: 0.75 }}>
+                                    <div style={{ display: "grid", gap: 8 }}>
+                                      {stationRows.map((row) => (
+                                        <div
+                                          key={row.id}
+                                          style={{
+                                            display: "grid",
+                                            gridTemplateColumns:
+                                              "1fr auto auto",
+                                            alignItems: "center",
+                                            gap: 10,
+                                            padding: "10px 12px",
+                                            borderRadius: 12,
+                                            border: `1px solid ${COLORS.border}`,
+                                            background: COLORS.soft,
+                                            opacity: alreadySubmitted
+                                              ? 0.75
+                                              : 1,
+                                            minWidth: 0,
+                                          }}
+                                        >
+                                          <div style={{ minWidth: 0 }}>
+                                            <div
+                                              style={{
+                                                fontWeight: 900,
+                                                color: COLORS.text,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                              }}
+                                            >
+                                              {row.name}{" "}
+                                              {poolsEnabled ? (
+                                                <span
+                                                  style={{
+                                                    fontSize: 12,
+                                                    opacity: 0.75,
+                                                  }}
+                                                >
                                                   (
                                                   {row.pool === "B"
                                                     ? "B"
@@ -3301,333 +2887,105 @@ export default function PuttingPage() {
                                                     : "A"}
                                                   )
                                                 </span>
-                                              </div>
-                                            </div>
-
-                                            <select
-                                              value={row.made === null ? "" : String(row.made)}
-                                              disabled={alreadySubmitted || finalized}
-                                              onChange={(e) =>
-                                                setMadeSequential(
-                                                  run.id,
-                                                  stNum,
-                                                  row.id,
-                                                  e.target.value === ""
-                                                    ? ""
-                                                    : Number(e.target.value)
-                                                )
-                                              }
-                                              style={{
-                                                ...inputStyle,
-                                                width: 84,
-                                                background: "#fff",
-                                                fontWeight: 900,
-                                                textAlign: "center",
-                                                justifySelf: "end",
-                                              }}
-                                            >
-                                              <option value="">—</option>
-                                              {[0, 1, 2, 3, 4].map((m) => (
-                                                <option key={m} value={m}>
-                                                  {m}
-                                                </option>
-                                              ))}
-                                            </select>
-
-                                            <div
-                                              style={{
-                                                textAlign: "right",
-                                                fontWeight: 900,
-                                                color: COLORS.navy,
-                                                justifySelf: "end",
-                                                whiteSpace: "nowrap",
-                                              }}
-                                            >
-                                              {row.pts} pts
+                                              ) : null}
                                             </div>
                                           </div>
-                                        ))}
-                                      </div>
+
+                                          <select
+                                            value={
+                                              row.made === null
+                                                ? ""
+                                                : String(row.made)
+                                            }
+                                            disabled={
+                                              alreadySubmitted || finalized
+                                            }
+                                            onChange={(e) =>
+                                              setMade(
+                                                currentRound,
+                                                stNum,
+                                                row.id,
+                                                e.target.value === ""
+                                                  ? ""
+                                                  : Number(e.target.value)
+                                              )
+                                            }
+                                            style={{
+                                              ...inputStyle,
+                                              width: 84,
+                                              background: "#fff",
+                                              fontWeight: 900,
+                                              textAlign: "center",
+                                              justifySelf: "end",
+                                            }}
+                                          >
+                                            <option value="">—</option>
+                                            {[0, 1, 2, 3, 4].map((m) => (
+                                              <option key={m} value={m}>
+                                                {m}
+                                              </option>
+                                            ))}
+                                          </select>
+
+                                          <div
+                                            style={{
+                                              textAlign: "right",
+                                              fontWeight: 900,
+                                              color: COLORS.navy,
+                                              justifySelf: "end",
+                                              whiteSpace: "nowrap",
+                                            }}
+                                          >
+                                            {row.pts} pts
+                                          </div>
+                                        </div>
+                                      ))}
                                     </div>
-                                  )}
-                                </div>
-                              );
-                            }
-                          )}
-                        </div>
-
-                        <div style={{ marginTop: 14 }}>
-                          <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}>
-                            Round {run.roundNum} Totals (This Card)
-                          </div>
-
-                          <div style={{ display: "grid", gap: 8 }}>
-                            {cardPlayers.map((p) => {
-                              const total = seqRunTotalForPlayer(run.id, p.id);
-                              return (
-                                <div
-                                  key={p.id}
-                                  style={{
-                                    padding: "10px 12px",
-                                    borderRadius: 12,
-                                    border: `1px solid ${COLORS.border}`,
-                                    background: "#fff",
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                    gap: 10,
-                                  }}
-                                >
-                                  <div style={{ fontWeight: 900 }}>
-                                    {p.name}{" "}
-                                    <span style={{ fontSize: 12, opacity: 0.75 }}>
-                                      (
-                                      {p.pool === "B"
-                                        ? "B"
-                                        : p.pool === "C"
-                                        ? "C"
-                                        : "A"}{" "}
-                                      Pool)
-                                    </span>
                                   </div>
-                                  <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                    {total} pts
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        <div style={{ marginTop: 14 }}>
-                          <button
-                            onClick={() => submitSequentialRun(run.id)}
-                            disabled={alreadySubmitted || finalized}
-                            style={{
-                              ...buttonStyle,
-                              width: "100%",
-                              background: alreadySubmitted ? "#ddd" : COLORS.green,
-                              color: alreadySubmitted ? "#444" : "white",
-                              border: `1px solid ${alreadySubmitted ? "#ddd" : COLORS.green}`,
-                            }}
-                          >
-                            {alreadySubmitted ? "Card Submitted (Locked)" : "Submit Card Scores"}
-                          </button>
-
-                          <div
-                            style={{
-                              marginTop: 8,
-                              fontSize: 12,
-                              opacity: 0.75,
-                              textAlign: "center",
-                            }}
-                          >
-                            Submitting locks this card and advances each player to the next round.
-                          </div>
-                        </div>
+                                )}
+                              </div>
+                            );
+                          }
+                        )}
                       </div>
-                    );
-                  })()
-                ) : (
-                  (() => {
-                    const card = currentCards.find((c) => c.id === activeCardId);
-                    if (!card) return null;
 
-                    const cardPlayers = (card.playerIds || [])
-                      .map((pid) => playerById[pid])
-                      .filter(Boolean);
-                    const alreadySubmitted =
-                      !!submitted?.[String(currentRound)]?.[card.id];
-
-                    return (
                       <div style={{ marginTop: 14 }}>
                         <div
                           style={{
                             fontWeight: 900,
                             color: COLORS.navy,
-                            marginBottom: 10,
+                            marginBottom: 8,
                           }}
                         >
-                          {card.name}{" "}
-                          {alreadySubmitted ? (
-                            <span style={{ color: COLORS.green, marginLeft: 8 }}>
-                              (submitted)
-                            </span>
-                          ) : (
-                            <span style={{ opacity: 0.6, marginLeft: 8 }}>
-                              (in progress)
-                            </span>
-                          )}
+                          Round {currentRound} Totals (This Card)
                         </div>
 
-                        <div style={{ display: "grid", gap: 10 }}>
-                          {Array.from({ length: stations }, (_, i) => i + 1).map(
-                            (stNum) => {
-                              const open = !!openStations[stNum];
-
-                              const stationRows = cardPlayers.map((p) => {
-                                const made = madeFor(currentRound, stNum, p.id);
-                                return {
-                                  id: p.id,
-                                  name: p.name,
-                                  pool: p.pool,
-                                  made,
-                                  pts: pointsForMade(made ?? 0),
-                                };
-                              });
-
-                              return (
-                                <div
-                                  key={stNum}
-                                  style={{
-                                    border: `1px solid ${COLORS.border}`,
-                                    borderRadius: 14,
-                                    background: COLORS.soft,
-                                    overflow: "hidden",
-                                  }}
-                                >
-                                  <div
-                                    onClick={() => toggleStation(stNum)}
-                                    style={{
-                                      padding: "12px 12px",
-                                      cursor: "pointer",
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      alignItems: "center",
-                                      gap: 10,
-                                    }}
-                                  >
-                                    <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                      Station {stNum}
-                                    </div>
-                                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                      {open ? "Tap to collapse" : "Tap to expand"}
-                                    </div>
-                                  </div>
-
-                                  {open && (
-                                    <div style={{ padding: 12, background: "#fff" }}>
-                                      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
-                                        Blank means “not entered yet.” (4=5pts, 3=3pts, 2=2pts, 1=1pt, 0=0)
-                                      </div>
-
-                                      <div style={{ display: "grid", gap: 8 }}>
-                                        {stationRows.map((row) => (
-                                          <div
-                                            key={row.id}
-                                            style={{
-                                              display: "grid",
-                                              gridTemplateColumns: "1fr auto auto",
-                                              alignItems: "center",
-                                              gap: 10,
-                                              padding: "10px 12px",
-                                              borderRadius: 12,
-                                              border: `1px solid ${COLORS.border}`,
-                                              background: COLORS.soft,
-                                              opacity: alreadySubmitted ? 0.75 : 1,
-                                              minWidth: 0,
-                                            }}
-                                          >
-                                            <div style={{ minWidth: 0 }}>
-                                              <div
-                                                style={{
-                                                  fontWeight: 900,
-                                                  color: COLORS.text,
-                                                  overflow: "hidden",
-                                                  textOverflow: "ellipsis",
-                                                  whiteSpace: "nowrap",
-                                                }}
-                                              >
-                                                {row.name}{" "}
-                                                <span style={{ fontSize: 12, opacity: 0.75 }}>
-                                                  (
-                                                  {row.pool === "B"
-                                                    ? "B"
-                                                    : row.pool === "C"
-                                                    ? "C"
-                                                    : "A"}
-                                                  )
-                                                </span>
-                                              </div>
-                                            </div>
-
-                                            <select
-                                              value={row.made === null ? "" : String(row.made)}
-                                              disabled={alreadySubmitted || finalized}
-                                              onChange={(e) =>
-                                                setMade(
-                                                  currentRound,
-                                                  stNum,
-                                                  row.id,
-                                                  e.target.value === ""
-                                                    ? ""
-                                                    : Number(e.target.value)
-                                                )
-                                              }
-                                              style={{
-                                                ...inputStyle,
-                                                width: 84,
-                                                background: "#fff",
-                                                fontWeight: 900,
-                                                textAlign: "center",
-                                                justifySelf: "end",
-                                              }}
-                                            >
-                                              <option value="">—</option>
-                                              {[0, 1, 2, 3, 4].map((m) => (
-                                                <option key={m} value={m}>
-                                                  {m}
-                                                </option>
-                                              ))}
-                                            </select>
-
-                                            <div
-                                              style={{
-                                                textAlign: "right",
-                                                fontWeight: 900,
-                                                color: COLORS.navy,
-                                                justifySelf: "end",
-                                                whiteSpace: "nowrap",
-                                              }}
-                                            >
-                                              {row.pts} pts
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            }
-                          )}
-                        </div>
-
-                        <div style={{ marginTop: 14 }}>
-                          <div style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}>
-                            Round {currentRound} Totals (This Card)
-                          </div>
-
-                          <div style={{ display: "grid", gap: 8 }}>
-                            {cardPlayers.map((p) => {
-                              const total = roundTotalForPlayer(currentRound, p.id);
-                              return (
-                                <div
-                                  key={p.id}
-                                  style={{
-                                    padding: "10px 12px",
-                                    borderRadius: 12,
-                                    border: `1px solid ${COLORS.border}`,
-                                    background: "#fff",
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                    gap: 10,
-                                  }}
-                                >
-                                  <div style={{ fontWeight: 900 }}>
-                                    {p.name}{" "}
-                                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                        <div style={{ display: "grid", gap: 8 }}>
+                          {cardPlayers.map((p) => {
+                            const total = roundTotalForPlayer(
+                              currentRound,
+                              p.id
+                            );
+                            return (
+                              <div
+                                key={p.id}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${COLORS.border}`,
+                                  background: "#fff",
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  gap: 10,
+                                }}
+                              >
+                                <div style={{ fontWeight: 900 }}>
+                                  {p.name}{" "}
+                                  {poolsEnabled ? (
+                                    <span
+                                      style={{ fontSize: 12, opacity: 0.75 }}
+                                    >
                                       (
                                       {p.pool === "B"
                                         ? "B"
@@ -3636,46 +2994,57 @@ export default function PuttingPage() {
                                         : "A"}{" "}
                                       Pool)
                                     </span>
-                                  </div>
-                                  <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                                    {total} pts
-                                  </div>
+                                  ) : null}
                                 </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        <div style={{ marginTop: 14 }}>
-                          <button
-                            onClick={() => submitCardScores(card.id)}
-                            disabled={alreadySubmitted || finalized}
-                            style={{
-                              ...buttonStyle,
-                              width: "100%",
-                              background: alreadySubmitted ? "#ddd" : COLORS.green,
-                              color: alreadySubmitted ? "#444" : "white",
-                              border: `1px solid ${alreadySubmitted ? "#ddd" : COLORS.green}`,
-                            }}
-                          >
-                            {alreadySubmitted ? "Card Submitted (Locked)" : "Submit Card Scores"}
-                          </button>
-
-                          <div
-                            style={{
-                              marginTop: 8,
-                              fontSize: 12,
-                              opacity: 0.75,
-                              textAlign: "center",
-                            }}
-                          >
-                            Submitting locks this card for this round.
-                          </div>
+                                <div
+                                  style={{
+                                    fontWeight: 900,
+                                    color: COLORS.navy,
+                                  }}
+                                >
+                                  {total} pts
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    );
-                  })()
-                )
+
+                      <div style={{ marginTop: 14 }}>
+                        <button
+                          onClick={() => submitCardScores(card.id)}
+                          disabled={alreadySubmitted || finalized}
+                          style={{
+                            ...buttonStyle,
+                            width: "100%",
+                            background: alreadySubmitted
+                              ? "#ddd"
+                              : COLORS.green,
+                            color: alreadySubmitted ? "#444" : "white",
+                            border: `1px solid ${
+                              alreadySubmitted ? "#ddd" : COLORS.green
+                            }`,
+                          }}
+                        >
+                          {alreadySubmitted
+                            ? "Card Submitted (Locked)"
+                            : "Submit Card Scores"}
+                        </button>
+
+                        <div
+                          style={{
+                            marginTop: 8,
+                            fontSize: 12,
+                            opacity: 0.75,
+                            textAlign: "center",
+                          }}
+                        >
+                          Submitting locks this card for this round.
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()
               ) : (
                 <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
                   Select your card to start scoring.
@@ -3703,7 +3072,12 @@ export default function PuttingPage() {
                 background: "#fff",
               }}
             >
-              <span>Leaderboards (Cumulative)</span>
+              <span>
+                Leaderboards (Cumulative){" "}
+                <span style={{ fontSize: 12, opacity: 0.75, fontWeight: 900 }}>
+                  — {poolsEnabled ? "Split Pool" : "Combined Pool"}
+                </span>
+              </span>
               <span style={{ fontSize: 12, opacity: 0.75 }}>
                 {leaderboardsOpen ? "Tap to hide" : "Tap to show"}
               </span>
@@ -3711,10 +3085,15 @@ export default function PuttingPage() {
 
             {leaderboardsOpen && (
               <div style={{ display: "grid", gap: 10 }}>
-                {["A", "B", "C"].map((k) => {
-                  const label =
-                    k === "A" ? "A Pool" : k === "B" ? "B Pool" : "C Pool";
-                  const rows = leaderboardByPool[k] || [];
+                {leaderboardKeys.map((k) => {
+                  const label = poolsEnabled
+                    ? k === "A"
+                      ? "A Pool"
+                      : k === "B"
+                      ? "B Pool"
+                      : "C Pool"
+                    : "Overall";
+                  const rows = leaderboardGroups[k] || [];
                   const ranks = computeTiedRanks(rows);
 
                   return (
@@ -3748,7 +3127,7 @@ export default function PuttingPage() {
                       <div style={{ padding: 12 }}>
                         {rows.length === 0 ? (
                           <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            No players in this pool yet.
+                            No players yet.
                           </div>
                         ) : (
                           <div style={{ display: "grid", gap: 8 }}>
@@ -3792,7 +3171,9 @@ export default function PuttingPage() {
                                         justifyContent: "center",
                                         fontWeight: 900,
                                         color: "white",
-                                        background: isPaid ? COLORS.green : COLORS.navy,
+                                        background: isPaid
+                                          ? COLORS.green
+                                          : COLORS.navy,
                                         flexShrink: 0,
                                       }}
                                     >
@@ -3810,20 +3191,6 @@ export default function PuttingPage() {
                                         }}
                                       >
                                         {r.name}
-
-                                        {isSequential ? (
-                                          <span
-                                            style={{
-                                              fontSize: 12,
-                                              marginLeft: 8,
-                                              opacity: 0.75,
-                                            }}
-                                          >
-                                            — through round{" "}
-                                            <strong>{r.throughRound ?? 0}</strong>
-                                          </span>
-                                        ) : null}
-
                                         {r.adj ? (
                                           <span
                                             style={{
@@ -3886,9 +3253,9 @@ export default function PuttingPage() {
               textAlign: "center",
             }}
           >
-            {isSequential
-              ? "Tip: In Sequential mode, create cards as players arrive. Each player’s leaderboard shows “through round X”."
-              : "Tip: Round 1 cards must be created before starting. After that, cards are auto-created each round based on the previous round’s totals."}
+            Tip: Round 1 cards must be created before starting. After that,
+            cards are auto-created each round based on the previous round’s
+            totals.
           </div>
 
           <div
