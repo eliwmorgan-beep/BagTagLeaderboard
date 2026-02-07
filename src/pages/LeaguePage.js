@@ -1,126 +1,118 @@
+// src/pages/LeaguePage.js
 import React, { useEffect, useMemo, useState } from "react";
-import { useParams, NavLink } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
-import { doc, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot } from "firebase/firestore";
 
 export default function LeaguePage() {
-  const { leagueId } = useParams();
+  const navigate = useNavigate();
 
-  const COLORS = {
-    blueLight: "#e6f3ff",
-    navy: "#1b1f5a",
-    orange: "#f4a83a",
-  };
+  const COLORS = useMemo(
+    () => ({
+      navy: "#1b1f5a",
+      blueLight: "#e6f3ff",
+      orange: "#f4a83a",
+      green: "#15803d",
+      red: "#b42318",
+      border: "rgba(27,31,90,0.22)",
+      card: "#ffffff",
+      soft: "#f6fbff",
+      muted: "rgba(0,0,0,0.65)",
+    }),
+    []
+  );
 
-  const buttonStyle = {
-    padding: "14px 18px",
-    borderRadius: 14,
-    border: `2px solid ${COLORS.navy}`,
-    fontWeight: 1000,
-    cursor: "pointer",
-    textDecoration: "none",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: "100%",
-    maxWidth: 320,
-    background: COLORS.orange,
-    color: "#1a1a1a",
-  };
-
-  const cardStyle = {
-    marginTop: 14,
-    padding: 14,
-    borderRadius: 14,
-    border: "1px solid #ddd",
-    background: "#fff",
-  };
-
-  const [loading, setLoading] = useState(false);
-  const [leagueData, setLeagueData] = useState(null);
-  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [leagueIds, setLeagueIds] = useState([]);
+  const [err, setErr] = useState("");
+  const [manualId, setManualId] = useState("");
 
   useEffect(() => {
-    let unsub = null;
+    let unsub = () => {};
 
-    async function run() {
-      setError("");
-      setLeagueData(null);
-
-      if (!leagueId) return;
-
+    (async () => {
+      setErr("");
       setLoading(true);
 
-      try {
-        await ensureAnonAuth();
+      // Make sure auth is ready (your rules require request.auth != null for writes;
+      // reads are allowed for everyone, but we still keep auth consistent across app)
+      await ensureAnonAuth();
 
-        const ref = doc(db, "leagues", leagueId);
-        unsub = onSnapshot(
-          ref,
-          (snap) => {
-            if (!snap.exists()) {
-              setLeagueData({ __notFound: true });
-            } else {
-              setLeagueData(snap.data());
-            }
-            setLoading(false);
-          },
-          (err) => {
-            console.error(err);
-            setError("Could not load this league.");
-            setLoading(false);
-          }
-        );
-      } catch (err) {
-        console.error(err);
-        setError("Could not load this league.");
-        setLoading(false);
-      }
-    }
+      const colRef = collection(db, "leagues");
 
-    run();
+      unsub = onSnapshot(
+        colRef,
+        (snap) => {
+          const ids = snap.docs
+            .map((d) => d.id)
+            .sort((a, b) => a.localeCompare(b));
+          setLeagueIds(ids);
+          setLoading(false);
+        },
+        (e) => {
+          console.error(e);
+          setErr(
+            "Could not load leagues from Firestore. (Check Firestore rules + console.)"
+          );
+          setLeagueIds([]);
+          setLoading(false);
+        }
+      );
+    })().catch((e) => {
+      console.error(e);
+      setErr(
+        "Could not initialize league chooser. (Check Firestore config + console.)"
+      );
+      setLoading(false);
+    });
 
-    return () => {
-      if (unsub) unsub();
-    };
-  }, [leagueId]);
+    return () => unsub();
+  }, []);
 
-  const summary = useMemo(() => {
-    if (!leagueData || leagueData.__notFound) return null;
+  function goToLeague(id) {
+    const clean = String(id || "").trim();
+    if (!clean) return;
+    navigate(`/league/${encodeURIComponent(clean)}`);
+  }
 
-    const defendEnabled = !!leagueData?.defendMode?.enabled;
+  const cardStyle = {
+    background: COLORS.card,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 18,
+    padding: 18,
+    boxShadow: "0 10px 26px rgba(0,0,0,0.06)",
+  };
 
-    const puttingPlayersCount = Array.isArray(leagueData?.putting?.players)
-      ? leagueData.putting.players.length
-      : Array.isArray(leagueData?.puttingLeague?.players)
-      ? leagueData.puttingLeague.players.length
-      : 0;
+  const buttonStyle = (variant = "orange") => {
+    const bg =
+      variant === "green"
+        ? COLORS.green
+        : variant === "navy"
+        ? COLORS.navy
+        : COLORS.orange;
 
-    const puttingStations =
-      leagueData?.putting?.settings?.stations ??
-      leagueData?.puttingLeague?.settings?.stations ??
-      null;
-
-    const puttingRounds =
-      leagueData?.putting?.settings?.rounds ??
-      leagueData?.puttingLeague?.settings?.rounds ??
-      null;
-
-    const doublesTeamsCount = Array.isArray(leagueData?.doubles?.teams)
-      ? leagueData.doubles.teams.length
-      : Array.isArray(leagueData?.doublesLeague?.teams)
-      ? leagueData.doublesLeague.teams.length
-      : 0;
+    const color = variant === "green" || variant === "navy" ? "white" : "#111";
 
     return {
-      defendEnabled,
-      puttingPlayersCount,
-      puttingStations,
-      puttingRounds,
-      doublesTeamsCount,
+      padding: "12px 14px",
+      borderRadius: 14,
+      border: `2px solid ${variant === "orange" ? COLORS.navy : bg}`,
+      background: bg,
+      color,
+      fontWeight: 1000,
+      cursor: "pointer",
     };
-  }, [leagueData]);
+  };
+
+  const inputStyle = {
+    padding: "12px 12px",
+    borderRadius: 14,
+    border: `1px solid ${COLORS.border}`,
+    outline: "none",
+    width: "100%",
+    fontSize: 14,
+  };
 
   return (
     <div
@@ -132,129 +124,145 @@ export default function LeaguePage() {
         padding: 24,
       }}
     >
-      <div style={{ width: "100%", maxWidth: 760 }}>
-        {/* ✅ Keep the existing Header/logo behavior */}
-        <Header />
+      <div style={{ width: "100%", maxWidth: 860 }}>
+        <div style={{ ...cardStyle, textAlign: "center" }}>
+          <Header />
 
-        <div style={{ marginTop: 18, textAlign: "center" }}>
-          <h1 style={{ margin: 0 }}>League</h1>
+          <div
+            style={{
+              marginTop: 16,
+              fontSize: 46,
+              fontWeight: 900,
+              color: COLORS.navy,
+              fontFamily: "Georgia, serif",
+              lineHeight: 1.1,
+            }}
+          >
+            League
+          </div>
 
-          {!leagueId && (
-            <div style={{ marginTop: 12, opacity: 0.85 }}>
-              <p>No league selected.</p>
-              <NavLink to="/" style={{ fontWeight: 900 }}>
-                ← Back to league chooser
-              </NavLink>
+          <div style={{ marginTop: 6, color: COLORS.muted, fontWeight: 800 }}>
+            Choose a league to continue.
+          </div>
+
+          {/* Manual always-works navigation */}
+          <div
+            style={{
+              marginTop: 18,
+              padding: 14,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              background: COLORS.soft,
+              textAlign: "left",
+            }}
+          >
+            <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+              Go to a league by ID
             </div>
-          )}
+            <div style={{ fontSize: 12, color: COLORS.muted, fontWeight: 800 }}>
+              Example: <b>pescado</b> or <b>default-league</b>
+            </div>
 
-          {leagueId && (
-            <>
-              <div style={{ marginTop: 6, opacity: 0.8, fontSize: 13 }}>
-                League code: <b>{leagueId}</b>
+            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+              <input
+                style={inputStyle}
+                placeholder="Enter league id…"
+                value={manualId}
+                onChange={(e) => setManualId(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") goToLeague(manualId);
+                }}
+              />
+              <button
+                style={buttonStyle("navy")}
+                onClick={() => goToLeague(manualId)}
+              >
+                Go
+              </button>
+            </div>
+          </div>
+
+          {/* Firestore list */}
+          <div style={{ marginTop: 18, textAlign: "left" }}>
+            <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+              Available leagues
+            </div>
+
+            {loading ? (
+              <div style={{ marginTop: 10, color: COLORS.muted }}>
+                Loading leagues…
               </div>
-
-              {loading && <div style={{ marginTop: 12 }}>Loading league…</div>}
-
-              {!!error && (
-                <div
-                  style={{ marginTop: 12, color: "#b00020", fontWeight: 900 }}
-                >
-                  {error}
-                </div>
-              )}
-
-              {leagueData && leagueData.__notFound && (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ color: "#b00020", fontWeight: 900 }}>
-                    League not found.
-                  </div>
-                  <div style={{ marginTop: 8, opacity: 0.85 }}>
-                    Double-check the league code you entered.
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <NavLink to="/" style={{ fontWeight: 900 }}>
-                      ← Back to league chooser
-                    </NavLink>
-                  </div>
-                </div>
-              )}
-
-              {leagueData && !leagueData.__notFound && (
-                <>
-                  <div style={cardStyle}>
-                    <div style={{ fontWeight: 1000, fontSize: 16 }}>
-                      {leagueData.displayName || leagueId}
-                    </div>
-
-                    {summary && (
-                      <div
-                        style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}
-                      >
-                        <div>
-                          Defend Mode:{" "}
-                          <b
-                            style={{
-                              color: summary.defendEnabled ? "#0a7a0a" : "#555",
-                            }}
-                          >
-                            {summary.defendEnabled ? "ON" : "OFF"}
-                          </b>
-                        </div>
-
-                        <div style={{ marginTop: 6 }}>
-                          Putting: <b>{summary.puttingPlayersCount}</b> players
-                          {summary.puttingStations != null &&
-                          summary.puttingRounds != null
-                            ? ` • ${summary.puttingStations} stations • ${summary.puttingRounds} rounds`
-                            : ""}
-                        </div>
-
-                        <div style={{ marginTop: 6 }}>
-                          Doubles: <b>{summary.doublesTeamsCount}</b> teams
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
+            ) : err ? (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 12,
+                  borderRadius: 14,
+                  border: `1px solid rgba(180,35,24,0.35)`,
+                  background: "rgba(180,35,24,0.06)",
+                  color: COLORS.red,
+                  fontWeight: 900,
+                }}
+              >
+                {err}
+              </div>
+            ) : leagueIds.length === 0 ? (
+              <div style={{ marginTop: 10, color: COLORS.muted }}>
+                No leagues found in Firestore collection <b>leagues</b>.
+              </div>
+            ) : (
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "grid",
+                  gap: 10,
+                  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                }}
+              >
+                {leagueIds.map((id) => (
                   <div
+                    key={id}
                     style={{
-                      marginTop: 16,
+                      border: `1px solid ${COLORS.border}`,
+                      borderRadius: 16,
+                      padding: 14,
+                      background: "#fff",
                       display: "flex",
                       flexDirection: "column",
-                      alignItems: "center",
-                      gap: 14,
+                      gap: 10,
                     }}
                   >
-                    <NavLink
-                      to={`/league/${encodeURIComponent(leagueId)}/tags`}
-                      style={buttonStyle}
-                    >
-                      Tags
-                    </NavLink>
+                    <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+                      {id}
+                    </div>
 
-                    <NavLink
-                      to={`/league/${encodeURIComponent(leagueId)}/putting`}
-                      style={buttonStyle}
+                    <button
+                      style={buttonStyle("orange")}
+                      onClick={() => goToLeague(id)}
                     >
-                      Putting
-                    </NavLink>
-
-                    <NavLink
-                      to={`/league/${encodeURIComponent(leagueId)}/doubles`}
-                      style={buttonStyle}
-                    >
-                      Doubles
-                    </NavLink>
-
-                    <NavLink to="/" style={{ marginTop: 4, fontWeight: 900 }}>
-                      ← Back to league chooser
-                    </NavLink>
+                      Open
+                    </button>
                   </div>
-                </>
-              )}
-            </>
-          )}
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: 18, fontSize: 12, opacity: 0.7 }}>
+            Tip: If this list is empty but you can see docs in Firestore, open
+            your browser console—any permission/config error will show there.
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            textAlign: "center",
+            fontSize: 12,
+            color: "#666",
+          }}
+        >
+          League chooser
         </div>
       </div>
     </div>
