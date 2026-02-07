@@ -5,6 +5,7 @@ import HomePage from "./pages/HomePage";
 import TagsPage from "./pages/TagsPage";
 import PuttingPage from "./pages/PuttingPage";
 import DoublesPage from "./pages/DoublesPage";
+import LeaguePage from "./pages/LeaguePage";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/tags" element={<TagsPage />} />
         <Route path="/putting" element={<PuttingPage />} />
         <Route path="/doubles" element={<DoublesPage />} />
+        <Route path="/league" element={<LeaguePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
