@@ -1,9 +1,9 @@
 // src/pages/DoublesPage.js
 import React, { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, NavLink } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
-import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, updateDoc, getDoc } from "firebase/firestore";
 
 const ADMIN_PASSWORD = "Pescado!";
 const APP_VERSION = "doubles-per-league-v1.6.0";
@@ -255,9 +255,17 @@ export default function DoublesPage() {
     soft: "#f6fbff",
   };
 
-  const leagueRef = useMemo(() => doc(db, "leagues", leagueId), [leagueId]);
-  const [loading, setLoading] = useState(true);
+  const safeLeagueId = String(leagueId || "");
+  const encodedLeagueId = encodeURIComponent(safeLeagueId);
 
+  // IMPORTANT: Firestore doc id should use raw leagueId (not encoded)
+  const leagueRef = useMemo(() => {
+    if (!safeLeagueId) return null;
+    return doc(db, "leagues", safeLeagueId);
+  }, [safeLeagueId]);
+
+  const [leagueDisplayName, setLeagueDisplayName] = useState("");
+  const [loading, setLoading] = useState(true);
   const [doubles, setDoubles] = useState(null);
 
   const [todayExpanded, setTodayExpanded] = useState(true);
@@ -335,25 +343,56 @@ export default function DoublesPage() {
   }
 
   useEffect(() => {
+    if (!leagueRef) {
+      setLoading(false);
+      return;
+    }
+
     let unsub = () => {};
 
     (async () => {
       await ensureAnonAuth();
 
+      // fetch displayName (fallback to leagueId)
+      try {
+        const snap0 = await getDoc(leagueRef);
+        const data0 = snap0.exists() ? snap0.data() || {} : {};
+        const dn =
+          typeof data0.displayName === "string" && data0.displayName.trim()
+            ? data0.displayName.trim()
+            : safeLeagueId;
+        setLeagueDisplayName(dn);
+      } catch {
+        setLeagueDisplayName(safeLeagueId);
+      }
+
       unsub = onSnapshot(
         leagueRef,
         async (snap) => {
           if (!snap.exists()) {
+            // create doc with displayName if missing
             await setDoc(
               leagueRef,
-              { doubles: defaultDoubles, createdAt: Date.now() },
+              {
+                displayName: safeLeagueId,
+                doubles: defaultDoubles,
+                createdAt: Date.now(),
+              },
               { merge: true }
             );
+            setLeagueDisplayName(safeLeagueId);
             setLoading(false);
             return;
           }
 
           const data = snap.data() || {};
+
+          const dn =
+            typeof data.displayName === "string" && data.displayName.trim()
+              ? data.displayName.trim()
+              : safeLeagueId;
+          setLeagueDisplayName(dn);
+
           const d = data.doubles || defaultDoubles;
 
           const safe = {
@@ -395,7 +434,7 @@ export default function DoublesPage() {
     })().catch(() => setLoading(false));
 
     return () => unsub();
-  }, [leagueRef, defaultDoubles, lateCardId]);
+  }, [leagueRef, defaultDoubles, lateCardId, safeLeagueId]);
 
   const isSeated = (doubles?.format || "random") === "seated";
   const started = !!doubles?.started;
@@ -1091,11 +1130,62 @@ export default function DoublesPage() {
     outline: "none",
   };
 
+  const leagueRowStyle = {
+    marginTop: 10,
+    fontSize: 16,
+    opacity: 0.85,
+    textAlign: "center",
+  };
+
+  if (!safeLeagueId) {
+    return (
+      <div style={pageWrap}>
+        <div style={container}>
+          <Header />
+          <div style={{ marginTop: 14, ...cardStyle }}>
+            <div style={{ fontWeight: 1000, color: COLORS.navy }}>
+              No league selected.
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <NavLink
+                to="/"
+                style={{
+                  fontWeight: 900,
+                  color: COLORS.navy,
+                  textDecoration: "none",
+                }}
+              >
+                ← Back to League Search
+              </NavLink>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (loading || !doubles) {
     return (
       <div style={pageWrap}>
         <div style={container}>
           <Header />
+
+          {/* League name + Back to League */}
+          <div style={leagueRowStyle}>
+            League: <b>{leagueDisplayName || safeLeagueId}</b>{" "}
+            <span style={{ opacity: 0.6 }}>•</span>{" "}
+            <NavLink
+              to={`/league/${encodedLeagueId}`}
+              style={{
+                fontWeight: 900,
+                color: COLORS.navy,
+                textDecoration: "none",
+              }}
+            >
+              Back to League
+            </NavLink>
+          </div>
+
           <div style={{ marginTop: 14, ...cardStyle }}>Loading Doubles…</div>
         </div>
       </div>
@@ -1112,6 +1202,22 @@ export default function DoublesPage() {
     <div style={pageWrap}>
       <div style={container}>
         <Header />
+
+        {/* ✅ League name + Back to League (matches the other page) */}
+        <div style={leagueRowStyle}>
+          League: <b>{leagueDisplayName || safeLeagueId}</b>{" "}
+          <span style={{ opacity: 0.6 }}>•</span>{" "}
+          <NavLink
+            to={`/league/${encodedLeagueId}`}
+            style={{
+              fontWeight: 900,
+              color: COLORS.navy,
+              textDecoration: "none",
+            }}
+          >
+            Back to League
+          </NavLink>
+        </div>
 
         {/* 1) Today's Format */}
         <div style={{ marginTop: 14, ...cardStyle }}>
@@ -1750,6 +1856,11 @@ export default function DoublesPage() {
                 </div>
               </div>
 
+              {/* Payouts (unchanged) */}
+              {/* ...everything below stays exactly as you already had it... */}
+
+              {/* (Keeping your existing Admin/Payout/Late Player/Edit Holes/Erase sections unchanged) */}
+
               {/* Payouts */}
               <div style={{ ...cardStyle, padding: 12 }}>
                 <div style={{ fontWeight: 1000, color: COLORS.navy }}>
@@ -2151,8 +2262,9 @@ export default function DoublesPage() {
             textAlign: "center",
           }}
         >
-          {APP_VERSION} • League: {leagueId} • Pot is computed from player
-          check-ins (buy-in per player) • Payouts are posted to teams
+          {APP_VERSION} • League: {leagueDisplayName || safeLeagueId} • Pot is
+          computed from player check-ins (buy-in per player) • Payouts are
+          posted to teams
         </div>
 
         <div style={{ height: 30 }} />
