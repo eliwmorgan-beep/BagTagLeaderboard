@@ -13,8 +13,9 @@ import {
 } from "firebase/firestore";
 
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.7.0";
+const APP_VERSION = "v1.7.3";
 
+// ✅ defaults now start at 0, and payouts can be enabled/disabled
 const DEFAULT_PAYOUT_CONFIG = {
   enabled: false,
   buyInDollars: 0,
@@ -151,11 +152,11 @@ function allocatePositionAmountsDollars(potDollars, shares) {
 
   const amounts = [...floors];
   let idx = 0;
-  while (remaining > 0 && frac.length) {
+  while (remaining > 0 && idx < frac.length) {
     amounts[frac[idx].i] += 1;
     remaining -= 1;
     idx += 1;
-    if (idx >= frac.length) idx = 0;
+    if (idx >= frac.length && remaining > 0) idx = 0;
   }
 
   const sum = amounts.reduce((a, b) => a + b, 0);
@@ -290,44 +291,41 @@ export default function PuttingPage() {
     return doc(db, "leagues", leagueId);
   }, [leagueId]);
 
-  // Putting league stored data
   const [putting, setPutting] = useState({
     settings: {
-      // shared config
+      // new:
+      playMode: "simultaneous", // simultaneous | sequential
+      poolMode: "split", // split | combined
+
       stations: 1,
       rounds: 1,
-      finalized: false,
 
-      // mode selectors
-      playMode: "simultaneous", // "simultaneous" | "sequential"
-      poolMode: "split", // "split" | "combined"
-
-      // simultaneous (legacy)
+      // simultaneous:
       locked: false,
       currentRound: 0,
+      finalized: false,
       cardMode: "", // "" | "manual" | "random"
 
-      // sequential
-      seqFormatLocked: false, // “Lock Format & Open Check-In”
-      seqCheckInLocked: false, // admin locks check-in later
+      // sequential:
+      formatLocked: false, // "Lock Format and Open Check-In"
+      checkinLocked: false, // "Lock Check-In"
     },
 
-    // shared
     players: [],
+
+    // simultaneous structures:
+    cardsByRound: {},
+    scores: {},
+    submitted: {},
+
+    // sequential structures:
+    seqCards: [], // [{id,name,playerIds}]
+    seqRoundScores: {}, // { round: { cardId: { playerId: number(0..50) } } }
+    seqSubmitted: {}, // { round: { cardId: true } }
+
     adjustments: {},
     payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
     payoutsPosted: {},
-
-    // simultaneous
-    cardsByRound: {},
-    scores: {}, // per-station
-    submitted: {},
-
-    // sequential
-    seqCards: [], // [{id,name,playerIds:[]}]
-    seqRoundScores: {}, // { [round]: { [playerId]: number } }
-    seqSubmitted: {}, // { [round]: { [cardId]: true } }
-    seqPlayerRounds: {}, // { [playerId]: maxSubmittedRound }
   });
 
   const [loading, setLoading] = useState(false);
@@ -345,49 +343,65 @@ export default function PuttingPage() {
   const [name, setName] = useState("");
   const [pool, setPool] = useState("A");
 
-  // Manual card creation UI (simultaneous Round 1)
+  // Simultaneous manual card creation UI (Round 1)
   const [selectedForCard, setSelectedForCard] = useState([]);
   const [cardName, setCardName] = useState("");
+
+  // Sequential card creation UI
+  const [seqSelected, setSeqSelected] = useState([]);
+  const [seqCardName, setSeqCardName] = useState("");
 
   // Scorekeeper selection UI (simultaneous)
   const [activeCardId, setActiveCardId] = useState("");
   const [openStations, setOpenStations] = useState({});
-
-  // Sequential UI
-  const [seqSelectedForCard, setSeqSelectedForCard] = useState([]);
-  const [seqCardName, setSeqCardName] = useState("");
-  const [seqCardsOpen, setSeqCardsOpen] = useState(true);
-  const [seqOpenCardIds, setSeqOpenCardIds] = useState({}); // {cardId: true}
 
   // ✅ Admin unlock window (device/tab specific)
   const [adminOkUntil, setAdminOkUntil] = useState(0);
 
   // -------- Helpers (computed) --------
   const settings = putting.settings || {};
-  const playMode =
-    settings.playMode === "sequential" ? "sequential" : "simultaneous";
-  const poolMode = settings.poolMode === "combined" ? "combined" : "split";
+  const playMode = String(settings.playMode || "simultaneous");
+  const poolMode = String(settings.poolMode || "split");
 
   const stations = Math.max(1, Math.min(18, Number(settings.stations || 1)));
   const totalRounds = Math.max(1, Math.min(5, Number(settings.rounds || 1)));
+
   const finalized = !!settings.finalized;
 
-  // simultaneous state
-  const simLocked = !!settings.locked;
+  // simultaneous
   const currentRound = Number(settings.currentRound || 0);
   const cardMode = String(settings.cardMode || "");
-  const roundStartedSim =
-    playMode === "simultaneous" && simLocked && currentRound >= 1;
-
-  // sequential state
-  const seqFormatLocked = !!settings.seqFormatLocked;
-  const seqCheckInLocked = !!settings.seqCheckInLocked;
-  const seqActive = playMode === "sequential" && seqFormatLocked && !finalized;
+  const roundStarted = !!settings.locked && currentRound >= 1;
 
   const players = Array.isArray(putting.players) ? putting.players : [];
+
+  const cardsByRound =
+    putting.cardsByRound && typeof putting.cardsByRound === "object"
+      ? putting.cardsByRound
+      : {};
+  const scores =
+    putting.scores && typeof putting.scores === "object" ? putting.scores : {};
+  const submitted =
+    putting.submitted && typeof putting.submitted === "object"
+      ? putting.submitted
+      : {};
   const adjustments =
     putting.adjustments && typeof putting.adjustments === "object"
       ? putting.adjustments
+      : {};
+
+  // sequential
+  const formatLocked = !!settings.formatLocked;
+  const checkinLocked = !!settings.checkinLocked;
+
+  const seqCards = Array.isArray(putting.seqCards) ? putting.seqCards : [];
+  const seqRoundScores =
+    putting.seqRoundScores && typeof putting.seqRoundScores === "object"
+      ? putting.seqRoundScores
+      : {};
+  const seqSubmitted =
+    putting.seqSubmitted && typeof putting.seqSubmitted === "object"
+      ? putting.seqSubmitted
       : {};
 
   const payoutConfig =
@@ -402,52 +416,16 @@ export default function PuttingPage() {
       ? putting.payoutsPosted
       : {};
 
-  // simultaneous data
-  const cardsByRound =
-    putting.cardsByRound && typeof putting.cardsByRound === "object"
-      ? putting.cardsByRound
-      : {};
-  const scores =
-    putting.scores && typeof putting.scores === "object" ? putting.scores : {};
-  const submitted =
-    putting.submitted && typeof putting.submitted === "object"
-      ? putting.submitted
-      : {};
-
   const r1Cards = Array.isArray(cardsByRound["1"]) ? cardsByRound["1"] : [];
   const currentCards = Array.isArray(cardsByRound[String(currentRound)])
     ? cardsByRound[String(currentRound)]
     : [];
-
-  // sequential data
-  const seqCards = Array.isArray(putting.seqCards) ? putting.seqCards : [];
-  const seqRoundScores =
-    putting.seqRoundScores && typeof putting.seqRoundScores === "object"
-      ? putting.seqRoundScores
-      : {};
-  const seqSubmitted =
-    putting.seqSubmitted && typeof putting.seqSubmitted === "object"
-      ? putting.seqSubmitted
-      : {};
-  const seqPlayerRounds =
-    putting.seqPlayerRounds && typeof putting.seqPlayerRounds === "object"
-      ? putting.seqPlayerRounds
-      : {};
 
   const playerById = useMemo(() => {
     const map = {};
     players.forEach((p) => (map[p.id] = p));
     return map;
   }, [players]);
-
-  // After simultaneous league starts, collapse admin tools/check-in by default (but NOT in sequential)
-  useEffect(() => {
-    if (roundStartedSim) {
-      setCheckinOpen(false);
-      setSetupOpen(false);
-      setPayoutsOpen(false);
-    }
-  }, [roundStartedSim]);
 
   // Return null if missing/unrecorded; otherwise 0..4
   function madeFor(roundNum, stationNum, playerId) {
@@ -469,7 +447,7 @@ export default function PuttingPage() {
     return !(raw === undefined || raw === null || raw === "");
   }
 
-  function roundTotalForPlayerSim(roundNum, playerId) {
+  function roundTotalForPlayer(roundNum, playerId) {
     let total = 0;
     for (let s = 1; s <= stations; s++) {
       const made = madeFor(roundNum, s, playerId);
@@ -478,30 +456,48 @@ export default function PuttingPage() {
     return total;
   }
 
-  function cumulativeBaseTotalForPlayerSim(playerId) {
+  function cumulativeBaseTotalForPlayer(playerId) {
     let total = 0;
     for (let r = 1; r <= totalRounds; r++) {
-      total += roundTotalForPlayerSim(r, playerId);
+      total += roundTotalForPlayer(r, playerId);
     }
     return total;
   }
 
-  // sequential totals
-  function roundsThroughForPlayerSeq(playerId) {
-    const n = Number(seqPlayerRounds?.[playerId] || 0);
-    return Math.max(0, Math.min(totalRounds, n));
+  function submittedCountForRound(roundNum) {
+    const cards = Array.isArray(cardsByRound[String(roundNum)])
+      ? cardsByRound[String(roundNum)]
+      : [];
+    const sub = submitted?.[String(roundNum)] || {};
+    const count = cards.filter((c) => !!sub?.[c.id]).length;
+    return { submitted: count, total: cards.length };
   }
 
-  function cumulativeBaseTotalForPlayerSeq(playerId) {
-    const through = roundsThroughForPlayerSeq(playerId);
-    let total = 0;
-    for (let r = 1; r <= through; r++) {
-      const rr = seqRoundScores?.[String(r)] || {};
-      const val = rr?.[playerId];
-      total += Number(val || 0);
-    }
-    return total;
+  function allCardsSubmittedForRound(roundNum) {
+    const { submitted: s, total: t } = submittedCountForRound(roundNum);
+    return t > 0 && s === t;
   }
+
+  function missingCardsForRound(roundNum) {
+    const cards = Array.isArray(cardsByRound[String(roundNum)])
+      ? cardsByRound[String(roundNum)]
+      : [];
+    const sub = submitted?.[String(roundNum)] || {};
+    return cards.filter((c) => !sub?.[c.id]);
+  }
+
+  // sequential: next round needed for a card
+  function seqNextRoundForCard(cardId) {
+    for (let r = 1; r <= totalRounds; r++) {
+      if (!seqSubmitted?.[String(r)]?.[cardId]) return r;
+    }
+    return null;
+  }
+
+  const cardsStillPlayingCount =
+    playMode === "sequential"
+      ? seqCards.filter((c) => seqNextRoundForCard(c.id) !== null).length
+      : 0;
 
   // ✅ Admin password gate (unlocks for 10 minutes on THIS device/tab)
   function requireAdmin(fn) {
@@ -532,46 +528,29 @@ export default function PuttingPage() {
       if (!snap.exists()) {
         await setDoc(leagueRef, {
           displayName: leagueId,
-          players: [],
-          rounds: [],
-          roundHistory: [],
-          defendMode: {
-            enabled: false,
-            scope: "podium",
-            durationType: "weeks",
-            weeks: 2,
-            tagExpiresAt: {},
-          },
           puttingLeague: {
             settings: {
-              stations: 1,
-              rounds: 1,
-              finalized: false,
-
               playMode: "simultaneous",
               poolMode: "split",
-
+              stations: 1,
+              rounds: 1,
               locked: false,
               currentRound: 0,
+              finalized: false,
               cardMode: "",
-
-              seqFormatLocked: false,
-              seqCheckInLocked: false,
+              formatLocked: false,
+              checkinLocked: false,
             },
-
             players: [],
-            adjustments: {},
-            payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-            payoutsPosted: {},
-
             cardsByRound: {},
             scores: {},
             submitted: {},
-
             seqCards: [],
             seqRoundScores: {},
             seqSubmitted: {},
-            seqPlayerRounds: {},
+            adjustments: {},
+            payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
+            payoutsPosted: {},
           },
         });
       }
@@ -581,44 +560,25 @@ export default function PuttingPage() {
         (s) => {
           const data = s.data() || {};
           const pl = data.puttingLeague || {};
+          const st = pl.settings || {};
 
           const safe = {
             ...pl,
             settings: {
-              stations: 1,
-              rounds: 1,
-              finalized: false,
+              playMode: st.playMode || "simultaneous",
+              poolMode: st.poolMode || "split",
+              stations: Number(st.stations ?? 1),
+              rounds: Number(st.rounds ?? 1),
 
-              playMode: "simultaneous",
-              poolMode: "split",
+              locked: !!st.locked,
+              currentRound: Number(st.currentRound ?? 0),
+              finalized: !!st.finalized,
+              cardMode: String(st.cardMode || ""),
 
-              locked: false,
-              currentRound: 0,
-              cardMode: "",
-
-              seqFormatLocked: false,
-              seqCheckInLocked: false,
-
-              ...(pl.settings || {}),
+              formatLocked: !!st.formatLocked,
+              checkinLocked: !!st.checkinLocked,
             },
-
             players: Array.isArray(pl.players) ? pl.players : [],
-            adjustments:
-              pl.adjustments && typeof pl.adjustments === "object"
-                ? pl.adjustments
-                : {},
-
-            payoutConfig:
-              pl.payoutConfig && typeof pl.payoutConfig === "object"
-                ? { ...DEFAULT_PAYOUT_CONFIG, ...pl.payoutConfig }
-                : { ...DEFAULT_PAYOUT_CONFIG },
-
-            payoutsPosted:
-              pl.payoutsPosted && typeof pl.payoutsPosted === "object"
-                ? pl.payoutsPosted
-                : {},
-
-            // simultaneous
             cardsByRound:
               pl.cardsByRound && typeof pl.cardsByRound === "object"
                 ? pl.cardsByRound
@@ -628,8 +588,6 @@ export default function PuttingPage() {
               pl.submitted && typeof pl.submitted === "object"
                 ? pl.submitted
                 : {},
-
-            // sequential
             seqCards: Array.isArray(pl.seqCards) ? pl.seqCards : [],
             seqRoundScores:
               pl.seqRoundScores && typeof pl.seqRoundScores === "object"
@@ -639,9 +597,17 @@ export default function PuttingPage() {
               pl.seqSubmitted && typeof pl.seqSubmitted === "object"
                 ? pl.seqSubmitted
                 : {},
-            seqPlayerRounds:
-              pl.seqPlayerRounds && typeof pl.seqPlayerRounds === "object"
-                ? pl.seqPlayerRounds
+            adjustments:
+              pl.adjustments && typeof pl.adjustments === "object"
+                ? pl.adjustments
+                : {},
+            payoutConfig:
+              pl.payoutConfig && typeof pl.payoutConfig === "object"
+                ? { ...DEFAULT_PAYOUT_CONFIG, ...pl.payoutConfig }
+                : { ...DEFAULT_PAYOUT_CONFIG },
+            payoutsPosted:
+              pl.payoutsPosted && typeof pl.payoutsPosted === "object"
+                ? pl.payoutsPosted
                 : {},
           };
 
@@ -681,43 +647,43 @@ export default function PuttingPage() {
     });
   }
 
-  // ---------- MODE / POOL TOGGLES ----------
-  async function setPlayMode(nextMode) {
-    const mode = nextMode === "sequential" ? "sequential" : "simultaneous";
-    await updatePutting({
-      settings: {
-        ...settings,
-        playMode: mode,
-      },
-    });
+  /* ===========================
+     MODE / POOL DESCRIPTIONS
+  =========================== */
+  const modeDesc =
+    playMode === "sequential"
+      ? "Sequential: Cards play independently. Check-in stays open while cards play. Cards submit one total per player per round (0–50). Leaderboard shows each player’s score “through round X”."
+      : "Simultaneous: Everyone is checked in first. All players are assigned to cards, and cards score per station in the same round at the same time. Between rounds, cards auto-create from standings.";
 
-    // local UI resets that are harmless
-    setActiveCardId("");
-    setOpenStations({});
-    setSelectedForCard([]);
-    setCardName("");
-    setSeqSelectedForCard([]);
-    setSeqCardName("");
-  }
+  const poolDesc =
+    poolMode === "combined"
+      ? "Combined Pool: Everyone is on one leaderboard. Pool selection is removed from check-in."
+      : "Split Pool: Players choose A/B/C pool at check-in. Leaderboards (and payouts) split by pool.";
 
-  async function setPoolMode(nextPoolMode) {
-    const pm = nextPoolMode === "combined" ? "combined" : "split";
+  /* ===========================
+     POOL NORMALIZATION
+     - If Combined Pool, we treat all players as pool 'A' internally.
+  =========================== */
+  const normalizedPlayers = useMemo(() => {
+    if (poolMode !== "combined") return players;
+    return players.map((p) => ({ ...p, pool: "A" }));
+  }, [players, poolMode]);
 
-    await updatePutting({
-      settings: {
-        ...settings,
-        poolMode: pm,
-      },
-    });
-  }
+  const normalizedPlayerById = useMemo(() => {
+    const map = {};
+    normalizedPlayers.forEach((p) => (map[p.id] = p));
+    return map;
+  }, [normalizedPlayers]);
 
-  // ---------- SIMULTANEOUS: card/round helpers ----------
+  /* ===========================
+     SIMULTANEOUS: CARD HELPERS
+  =========================== */
   function validateRound1Cards(cards) {
     if (!Array.isArray(cards) || cards.length === 0) {
       return { ok: false, reason: "No cards created yet." };
     }
 
-    const allIds = new Set(players.map((p) => p.id));
+    const allIds = new Set(normalizedPlayers.map((p) => p.id));
     const seen = new Set();
 
     for (const c of cards) {
@@ -756,7 +722,7 @@ export default function PuttingPage() {
   }
 
   function buildRandomCardsRound1() {
-    const arr = [...players];
+    const arr = [...normalizedPlayers];
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
@@ -780,8 +746,8 @@ export default function PuttingPage() {
   }
 
   function buildAutoCardsFromRound(roundNum) {
-    const ranked = [...players]
-      .map((p) => ({ id: p.id, total: roundTotalForPlayerSim(roundNum, p.id) }))
+    const ranked = [...normalizedPlayers]
+      .map((p) => ({ id: p.id, total: roundTotalForPlayer(roundNum, p.id) }))
       .sort((a, b) => b.total - a.total);
 
     const sizes = computeCardSizesNoOnes(ranked.length);
@@ -801,48 +767,36 @@ export default function PuttingPage() {
     return cards;
   }
 
-  function submittedCountForRound(roundNum) {
-    const cards = Array.isArray(cardsByRound[String(roundNum)])
-      ? cardsByRound[String(roundNum)]
-      : [];
-    const sub = submitted?.[String(roundNum)] || {};
-    const count = cards.filter((c) => !!sub?.[c.id]).length;
-    return { submitted: count, total: cards.length };
-  }
+  /* ===========================
+     ADMIN ACTIONS
+  =========================== */
 
-  function allCardsSubmittedForRound(roundNum) {
-    const { submitted: s, total: t } = submittedCountForRound(roundNum);
-    return t > 0 && s === t;
-  }
-
-  function missingCardsForRound(roundNum) {
-    const cards = Array.isArray(cardsByRound[String(roundNum)])
-      ? cardsByRound[String(roundNum)]
-      : [];
-    const sub = submitted?.[String(roundNum)] || {};
-    return cards.filter((c) => !sub?.[c.id]);
-  }
-
-  // ---------- PLAYER CHECK-IN (shared UI, behavior depends on mode + pool mode) ----------
+  // Add player (works for both modes; sequential respects checkin lock)
   async function addPlayer() {
     if (finalized) {
       alert("Scores are finalized. Reset to start a new league.");
       return;
     }
 
-    // gating depends on mode
-    if (playMode === "simultaneous") {
-      if (roundStartedSim) return;
-    } else {
-      // sequential: only allow add when format locked/open AND check-in not locked
-      if (!seqFormatLocked) return;
-      if (seqCheckInLocked) return;
+    // Simultaneous: no check-in after round started
+    if (playMode === "simultaneous" && roundStarted) return;
+
+    // Sequential: no check-in until format locked, and can be locked later
+    if (playMode === "sequential") {
+      if (!formatLocked) {
+        alert("Check-in is closed until the admin clicks Lock Format and Open Check-In.");
+        return;
+      }
+      if (checkinLocked) {
+        alert("Check-in is locked.");
+        return;
+      }
     }
 
     const n = (name || "").trim();
     if (!n) return;
 
-    const exists = players.some(
+    const exists = normalizedPlayers.some(
       (p) => (p.name || "").trim().toLowerCase() === n.toLowerCase()
     );
     if (exists) {
@@ -862,7 +816,56 @@ export default function PuttingPage() {
     setPool("A");
   }
 
-  // ---------- SIMULTANEOUS: manual cards ----------
+  // Mode toggle
+  async function setPlayMode(nextMode) {
+    if (finalized) return;
+
+    await requireAdmin(async () => {
+      // If already "in progress" in one mode, warn
+      const hasSimData =
+        (putting.players?.length || 0) > 0 ||
+        Object.keys(putting.cardsByRound || {}).length > 0 ||
+        Object.keys(putting.scores || {}).length > 0;
+
+      const hasSeqData =
+        (putting.players?.length || 0) > 0 ||
+        (putting.seqCards?.length || 0) > 0 ||
+        Object.keys(putting.seqRoundScores || {}).length > 0;
+
+      if ((nextMode === "simultaneous" && hasSeqData) || (nextMode === "sequential" && hasSimData)) {
+        const ok = window.confirm(
+          "Switching formats while data exists can be confusing.\n\nIf you are switching because you chose the wrong mode, consider resetting the Putting League first.\n\nSwitch anyway?"
+        );
+        if (!ok) return;
+      }
+
+      await updatePutting({
+        settings: {
+          ...settings,
+          playMode: nextMode,
+        },
+      });
+    });
+  }
+
+  // Pool mode toggle (disallow changing after players exist)
+  async function setPoolMode(next) {
+    if (finalized) return;
+    await requireAdmin(async () => {
+      if (players.length > 0) {
+        alert("Pool mode can't be changed after players have checked in. Reset Putting League to change it.");
+        return;
+      }
+      await updatePutting({
+        settings: { ...settings, poolMode: next },
+      });
+    });
+  }
+
+  /* ===========================
+     SIMULTANEOUS MODE ACTIONS
+  =========================== */
+
   function toggleSelectForCard(playerId) {
     setSelectedForCard((prev) =>
       prev.includes(playerId)
@@ -872,15 +875,15 @@ export default function PuttingPage() {
   }
 
   async function setCardModeManual() {
-    if (finalized || roundStartedSim) return;
+    if (finalized || roundStarted) return;
     await updatePutting({ settings: { ...settings, cardMode: "manual" } });
     setCardsOpen(true);
   }
 
   async function randomizeRound1Cards() {
-    if (finalized || roundStartedSim) return;
+    if (finalized || roundStarted) return;
 
-    if (players.length < 2) {
+    if (normalizedPlayers.length < 2) {
       alert("Check in at least 2 players first.");
       return;
     }
@@ -897,9 +900,9 @@ export default function PuttingPage() {
     setCardsOpen(true);
   }
 
-  async function createCardSim() {
+  async function createCardSimultaneous() {
     if (finalized) return;
-    if (roundStartedSim) {
+    if (roundStarted) {
       alert("Round has started. Round 1 cards are locked.");
       return;
     }
@@ -932,13 +935,15 @@ export default function PuttingPage() {
 
     setSelectedForCard([]);
     setCardName("");
+    setName("");
+    setPool("A");
   }
 
   async function beginRoundOneSimultaneous() {
     if (finalized) return;
 
     await requireAdmin(async () => {
-      if (players.length < 2)
+      if (normalizedPlayers.length < 2)
         return alert("Check in at least 2 players first.");
 
       const check = validateRound1Cards(r1Cards);
@@ -957,10 +962,6 @@ export default function PuttingPage() {
           locked: true,
           currentRound: 1,
           finalized: false,
-          // sequential flags should be off when running simultaneous
-          seqFormatLocked: false,
-          seqCheckInLocked: false,
-          playMode: "simultaneous",
         },
         submitted: {
           ...(putting.submitted || {}),
@@ -969,7 +970,6 @@ export default function PuttingPage() {
       });
 
       setSetupOpen(false);
-      setCheckinOpen(false);
       setCardsOpen(true);
       setPayoutsOpen(false);
       window.scrollTo(0, 0);
@@ -980,7 +980,7 @@ export default function PuttingPage() {
     if (finalized) return;
 
     await requireAdmin(async () => {
-      if (!simLocked || currentRound < 1)
+      if (!settings.locked || currentRound < 1)
         return alert("Round 1 has not begun yet.");
       if (currentRound >= totalRounds)
         return alert("You are already on the final round.");
@@ -1014,7 +1014,7 @@ export default function PuttingPage() {
   }
 
   async function finalizeScoresSimultaneous() {
-    if (!simLocked || currentRound < 1)
+    if (!settings.locked || currentRound < 1)
       return alert("League hasn't started yet.");
     if (currentRound !== totalRounds)
       return alert("Finalize is only available on the final round.");
@@ -1036,186 +1036,242 @@ export default function PuttingPage() {
     alert("Scores finalized. Leaderboards are now locked.");
   }
 
-  // ---------- SEQUENTIAL: lock format, check-in lock, card creation, per-round submits ----------
-  async function lockFormatAndOpenCheckInSequential() {
+  /* ===========================
+     SEQUENTIAL MODE ACTIONS
+  =========================== */
+
+  async function lockFormatAndOpenCheckin() {
     if (finalized) return;
     await requireAdmin(async () => {
       await updatePutting({
         settings: {
           ...settings,
-          playMode: "sequential",
           stations,
           rounds: totalRounds,
-          seqFormatLocked: true,
-          seqCheckInLocked: false,
-          // ensure simultaneous is not running
           locked: false,
           currentRound: 0,
           cardMode: "",
+          formatLocked: true,
+          checkinLocked: false,
+          finalized: false,
         },
       });
+      setSetupOpen(false);
       setCheckinOpen(true);
       setCardsOpen(true);
-      alert("Format locked. Check-in is now open.");
+      window.scrollTo(0, 0);
     });
   }
 
-  async function lockCheckInSequential() {
+  async function lockCheckinSequential() {
     if (finalized) return;
     await requireAdmin(async () => {
-      if (!seqFormatLocked) return alert("Lock the format first.");
+      if (!formatLocked) return alert("Format is not locked/open yet.");
       await updatePutting({
         settings: {
           ...settings,
-          seqCheckInLocked: true,
+          checkinLocked: true,
         },
       });
-      alert("Check-in locked.");
     });
   }
 
+  function seqAssignedPlayerIds() {
+    const used = new Set();
+    seqCards.forEach((c) => (c.playerIds || []).forEach((id) => used.add(id)));
+    return used;
+  }
+
+  const seqUnassignedPlayers = useMemo(() => {
+    const used = seqAssignedPlayerIds();
+    return normalizedPlayers.filter((p) => !used.has(p.id));
+  }, [normalizedPlayers, seqCards]);
+
   function toggleSeqSelect(playerId) {
-    setSeqSelectedForCard((prev) =>
+    setSeqSelected((prev) =>
       prev.includes(playerId)
         ? prev.filter((x) => x !== playerId)
         : [...prev, playerId]
     );
   }
 
-  function seqAssignedPlayerIds() {
-    const set = new Set();
-    seqCards.forEach((c) => (c.playerIds || []).forEach((id) => set.add(id)));
-    return set;
-  }
-
   async function createCardSequential() {
     if (finalized) return;
-    if (!seqFormatLocked) return alert("Lock format & open check-in first.");
-    if (seqSelectedForCard.length < 2)
-      return alert("Select at least 2 players.");
-    if (seqSelectedForCard.length > 4) return alert("Max 4 players per card.");
 
-    const assigned = seqAssignedPlayerIds();
-    const overlaps = seqSelectedForCard.some((id) => assigned.has(id));
-    if (overlaps)
-      return alert("One or more selected players are already on a card.");
+    if (!formatLocked) {
+      alert("Admin must click Lock Format and Open Check-In first.");
+      return;
+    }
+
+    const count = seqSelected.length;
+    if (count < 2) return alert("Select at least 2 players for a card.");
+    if (count > 4) return alert("Max 4 players per card.");
+
+    const used = seqAssignedPlayerIds();
+    const overlaps = seqSelected.some((id) => used.has(id));
+    if (overlaps) {
+      alert("One or more selected players are already assigned to a card.");
+      return;
+    }
 
     const newCard = {
       id: uid(),
       name: (seqCardName || "").trim() || `Card ${seqCards.length + 1}`,
-      playerIds: [...seqSelectedForCard],
+      playerIds: [...seqSelected],
     };
 
     await updatePutting({
       seqCards: [...seqCards, newCard],
     });
 
-    setSeqSelectedForCard([]);
+    setSeqSelected([]);
     setSeqCardName("");
   }
 
-  function nextRoundForCard(cardId) {
+  function seqCardRoundTotalsForPlayer(playerId) {
+    // returns { total, throughRound }
+    let total = 0;
+    let through = 0;
     for (let r = 1; r <= totalRounds; r++) {
-      const sub = seqSubmitted?.[String(r)] || {};
-      if (!sub?.[cardId]) return r;
+      // only count if that round has been submitted by THAT card; but we don't know card here
+      // In sequential, we count a player's round if there exists a submitted card round that contains them.
+      const roundSubmitted = seqSubmitted?.[String(r)] || {};
+      const roundScores = seqRoundScores?.[String(r)] || {};
+      let counted = false;
+
+      Object.keys(roundSubmitted).forEach((cardId) => {
+        if (!roundSubmitted[cardId]) return;
+        const card = seqCards.find((c) => c.id === cardId);
+        if (!card) return;
+        if (!(card.playerIds || []).includes(playerId)) return;
+
+        const raw = roundScores?.[cardId]?.[playerId];
+        const val = Number(raw);
+        if (!Number.isNaN(val)) {
+          total += val;
+          counted = true;
+        }
+      });
+
+      if (counted) through = r;
     }
-    return null; // done
+    return { total, throughRound: through };
   }
 
-  function seqScoreValue(roundNum, playerId) {
-    const rr = seqRoundScores?.[String(roundNum)] || {};
-    const v = rr?.[playerId];
-    if (v === undefined || v === null || v === "") return "";
-    const n = Number(v);
-    return Number.isNaN(n) ? "" : n;
-  }
-
-  async function setSeqRoundScore(roundNum, playerId, value) {
+  async function setSeqPlayerRoundScore(roundNum, cardId, playerId, val) {
     if (finalized) return;
-    if (!seqFormatLocked) return;
 
-    const v =
-      value === "" || value === null || value === undefined
-        ? ""
-        : clampInt(value, 0, 50);
+    const n = clampInt(val, 0, 50);
 
-    const path = `puttingLeague.seqRoundScores.${String(roundNum)}.${playerId}`;
-    if (v === "") {
-      await updateDoc(leagueRef, { [path]: deleteField() });
-      return;
-    }
-    await updateDoc(leagueRef, { [path]: v });
+    const path = `puttingLeague.seqRoundScores.${String(roundNum)}.${String(
+      cardId
+    )}.${String(playerId)}`;
+
+    await updateDoc(leagueRef, { [path]: n });
   }
 
-  function isSeqCardRoundFullyFilled(card, roundNum) {
-    const ids = card?.playerIds || [];
-    if (!ids.length) return false;
-
-    const rr = seqRoundScores?.[String(roundNum)] || {};
-    for (const pid of ids) {
-      const raw = rr?.[pid];
-      if (raw === undefined || raw === null || raw === "") return false;
-    }
-    return true;
-  }
-
-  async function submitSeqCardRound(cardId) {
+  async function submitSeqCardRound(cardId, roundNum) {
     if (finalized) return;
+
     const card = seqCards.find((c) => c.id === cardId);
     if (!card) return;
 
-    const roundNum = nextRoundForCard(cardId);
-    if (!roundNum) return;
-
-    if (!isSeqCardRoundFullyFilled(card, roundNum)) {
-      alert(
-        "Missing scores. Enter a score (0–50) for every player on this card."
-      );
-      return;
+    // Require all players filled
+    const roundScores = seqRoundScores?.[String(roundNum)]?.[cardId] || {};
+    for (const pid of card.playerIds || []) {
+      const raw = roundScores?.[pid];
+      if (raw === undefined || raw === null || raw === "") {
+        alert("Fill all player scores for this round (0–50).");
+        return;
+      }
+      const n = Number(raw);
+      if (Number.isNaN(n)) {
+        alert("Scores must be numbers.");
+        return;
+      }
     }
 
-    await requireAdmin(async () => {
-      // mark card submitted for that round
-      await updatePutting({
-        seqSubmitted: {
-          ...seqSubmitted,
-          [String(roundNum)]: {
-            ...(seqSubmitted?.[String(roundNum)] || {}),
-            [cardId]: true,
-          },
-        },
-        seqPlayerRounds: {
-          ...seqPlayerRounds,
-          ...(card.playerIds || []).reduce((acc, pid) => {
-            const prev = Number(seqPlayerRounds?.[pid] || 0);
-            acc[pid] = Math.max(prev, roundNum);
-            return acc;
-          }, {}),
-        },
-      });
-
-      alert(
-        roundNum === totalRounds
-          ? "Final round submitted ✅"
-          : `Round ${roundNum} submitted ✅`
-      );
-    });
+    // ✅ No admin password required to submit a card round
+    await updatePuttingDot(
+      `seqSubmitted.${String(roundNum)}.${String(cardId)}`,
+      true
+    );
+    alert(`Submitted Round ${roundNum} ✅`);
   }
 
   async function finalizeLeaderboardSequential() {
     if (finalized) return;
+
     await requireAdmin(async () => {
+      const ok = window.confirm(
+        "Finalize Leaderboard?\n\nThis locks all scores and prevents any more submissions."
+      );
+      if (!ok) return;
+
       await updatePutting({
-        settings: {
-          ...settings,
-          finalized: true,
-        },
+        settings: { ...settings, finalized: true },
       });
-      alert("Leaderboard finalized (locked).");
+      alert("Finalized ✅");
     });
   }
 
-  // -------- Admin leaderboard adjustment tool (shared, applies to whichever mode is active) --------
+  /* ===========================
+     RESET
+  =========================== */
+  async function resetPuttingLeague() {
+    await requireAdmin(async () => {
+      const ok = window.confirm(
+        "Reset PUTTING league only?\n\nThis clears putting players, cards, scores, settings, leaderboard adjustments, and payout settings."
+      );
+      if (!ok) return;
+
+      await updateDoc(leagueRef, {
+        puttingLeague: {
+          settings: {
+            playMode: "simultaneous",
+            poolMode: "split",
+            stations: 1,
+            rounds: 1,
+            locked: false,
+            currentRound: 0,
+            finalized: false,
+            cardMode: "",
+            formatLocked: false,
+            checkinLocked: false,
+          },
+          players: [],
+          cardsByRound: {},
+          scores: {},
+          submitted: {},
+          seqCards: [],
+          seqRoundScores: {},
+          seqSubmitted: {},
+          adjustments: {},
+          payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
+          payoutsPosted: {},
+        },
+      });
+
+      setActiveCardId("");
+      setOpenStations({});
+      setSelectedForCard([]);
+      setCardName("");
+      setSeqSelected([]);
+      setSeqCardName("");
+      setName("");
+      setPool("A");
+      setSetupOpen(false);
+      setCheckinOpen(true);
+      setCardsOpen(true);
+      setLeaderboardsOpen(false);
+      setAdjustOpen(false);
+      setPayoutsOpen(false);
+    });
+  }
+
+  /* ===========================
+     ADJUSTMENTS (shared)
+  =========================== */
   async function openAdjustmentsEditor() {
     if (finalized)
       return alert("Leaderboards are finalized. Adjustments are locked.");
@@ -1227,9 +1283,9 @@ export default function PuttingPage() {
 
     await requireAdmin(async () => {
       const base =
-        playMode === "sequential"
-          ? cumulativeBaseTotalForPlayerSeq(playerId)
-          : cumulativeBaseTotalForPlayerSim(playerId);
+        playMode === "simultaneous"
+          ? cumulativeBaseTotalForPlayer(playerId)
+          : seqCardRoundTotalsForPlayer(playerId).total;
 
       const desired = Number(desiredFinalTotal);
       if (Number.isNaN(desired)) return;
@@ -1248,7 +1304,9 @@ export default function PuttingPage() {
     });
   }
 
-  // -------- Scorekeeper (SIMULTANEOUS ONLY) --------
+  /* ===========================
+     SCOREKEEPER (SIMULTANEOUS)
+  =========================== */
   function toggleStation(stationNum) {
     setOpenStations((prev) => ({ ...prev, [stationNum]: !prev[stationNum] }));
   }
@@ -1308,20 +1366,24 @@ export default function PuttingPage() {
     alert("Card submitted (locked)!");
   }
 
-  // -------- LEADERBOARDS (mode-aware + pool-mode-aware) --------
-  const leaderboardGroups = useMemo(() => {
-    const groups =
-      poolMode === "combined" ? { ALL: [] } : { A: [], B: [], C: [] };
+  /* ===========================
+     LEADERBOARDS
+     - Simultaneous: cumulative by stations/rounds
+     - Sequential: cumulative of submitted rounds only, with "through round X"
+     - Pool mode: split or combined
+  =========================== */
+  const leaderboardData = useMemo(() => {
+    const pools = { A: [], B: [], C: [] };
 
-    players.forEach((p) => {
+    normalizedPlayers.forEach((p) => {
       const base =
-        playMode === "sequential"
-          ? cumulativeBaseTotalForPlayerSeq(p.id)
-          : cumulativeBaseTotalForPlayerSim(p.id);
+        playMode === "simultaneous"
+          ? cumulativeBaseTotalForPlayer(p.id)
+          : seqCardRoundTotalsForPlayer(p.id).total;
 
       const through =
         playMode === "sequential"
-          ? roundsThroughForPlayerSeq(p.id)
+          ? seqCardRoundTotalsForPlayer(p.id).throughRound
           : totalRounds;
 
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
@@ -1336,2720 +1398,10 @@ export default function PuttingPage() {
         total,
         adj,
         payoutDollars,
-        throughRound: playMode === "sequential" ? through : null,
+        throughRound: through,
       };
 
       if (poolMode === "combined") {
-        groups.ALL.push(row);
+        pools.A.push(row);
       } else {
-        if (p.pool === "B") groups.B.push(row);
-        else if (p.pool === "C") groups.C.push(row);
-        else groups.A.push(row);
-      }
-    });
-
-    Object.keys(groups).forEach((k) =>
-      groups[k].sort((a, b) => b.total - a.total)
-    );
-    return groups;
-  }, [
-    players,
-    playMode,
-    poolMode,
-    scores,
-    seqRoundScores,
-    seqPlayerRounds,
-    stations,
-    totalRounds,
-    adjustments,
-    payoutsPosted,
-  ]);
-
-  // ---- payouts computation (adapts to combined pool) ----
-  function computeAllPayoutsDollars() {
-    if (!payoutConfig) return { ok: false, reason: "No payout configuration." };
-    if (!payoutConfig.enabled)
-      return { ok: false, reason: "Payouts are disabled." };
-
-    const buyIn = clampInt(payoutConfig.buyInDollars, 0, 50);
-    const feePct = clampInt(payoutConfig.leagueFeePct, 0, 50);
-    let mode = payoutConfig.mode;
-
-    if (!players.length) return { ok: false, reason: "No players checked in." };
-
-    // If combined pool, collective mode is not meaningful; force pool mode
-    if (poolMode === "combined") mode = "pool";
-
-    const totalPotDollars = buyIn * players.length;
-    const feeDollars = Math.round((totalPotDollars * feePct) / 100);
-    const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
-
-    if (potAfterFeeDollars <= 0)
-      return { ok: false, reason: "Pot after fee is $0." };
-
-    const pools =
-      poolMode === "combined"
-        ? {
-            ALL: (leaderboardGroups.ALL || []).map((r) => ({
-              id: r.id,
-              total: r.total,
-              name: r.name,
-            })),
-          }
-        : {
-            A: (leaderboardGroups.A || []).map((r) => ({
-              id: r.id,
-              total: r.total,
-              name: r.name,
-            })),
-            B: (leaderboardGroups.B || []).map((r) => ({
-              id: r.id,
-              total: r.total,
-              name: r.name,
-            })),
-            C: (leaderboardGroups.C || []).map((r) => ({
-              id: r.id,
-              total: r.total,
-              name: r.name,
-            })),
-          };
-
-    if (mode === "pool") {
-      const payouts = {};
-
-      const poolPotDollars = (poolCount) => {
-        const poolTotal = buyIn * poolCount;
-        const poolFee = Math.round((poolTotal * feePct) / 100);
-        return Math.max(0, poolTotal - poolFee);
-      };
-
-      const doPool = (key) => {
-        const rows = pools[key] || [];
-        const pot = poolPotDollars(rows.length);
-
-        const places = payoutPlacesForPoolSize(rows.length);
-        const shares = sharesByPoolMode(places);
-
-        const positionAmounts = allocatePositionAmountsDollars(pot, shares);
-
-        const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
-          rows,
-          positionAmounts
-        );
-
-        Object.entries(poolPayouts).forEach(([pid, dollars]) => {
-          payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
-        });
-      };
-
-      Object.keys(pools).forEach((k) => doPool(k));
-
-      return {
-        ok: true,
-        payouts,
-        meta: {
-          buyIn,
-          feePct,
-          mode,
-          totalPotDollars,
-          feeDollars,
-          potAfterFeeDollars,
-        },
-      };
-    }
-
-    // collective only when split pools
-    const countA = (pools.A || []).length;
-    const countB = (pools.B || []).length;
-    const countC = (pools.C || []).length;
-
-    const placesA = payoutPlacesForPoolSize(countA);
-    const placesB = payoutPlacesForPoolSize(countB);
-    const placesC = payoutPlacesForPoolSize(countC);
-
-    const slots = [];
-    for (let i = 1; i <= Math.min(3, placesA); i++)
-      slots.push({ pool: "A", pos: i });
-    for (let i = 1; i <= Math.min(2, placesB); i++)
-      slots.push({ pool: "B", pos: i });
-    for (let i = 1; i <= Math.min(1, placesC); i++)
-      slots.push({ pool: "C", pos: i });
-
-    if (!slots.length)
-      return { ok: false, reason: "No payout slots available." };
-
-    const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
-    const slotShares = scaleWeightsToFractions(base);
-
-    const slotAmounts = allocatePositionAmountsDollars(
-      potAfterFeeDollars,
-      slotShares
-    );
-
-    const perPoolPositionAmounts = { A: [], B: [], C: [] };
-    slots.forEach((slot, idx) => {
-      const amt = slotAmounts[idx] || 0;
-      const posIndex = slot.pos - 1;
-      perPoolPositionAmounts[slot.pool][posIndex] =
-        (perPoolPositionAmounts[slot.pool][posIndex] || 0) + amt;
-    });
-
-    const payouts = {};
-    ["A", "B", "C"].forEach((k) => {
-      const amounts = perPoolPositionAmounts[k].filter(
-        (x) => typeof x === "number"
-      );
-      if (!amounts.length) return;
-
-      const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
-        pools[k],
-        amounts
-      );
-
-      Object.entries(poolPayouts).forEach(([pid, dollars]) => {
-        payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
-      });
-    });
-
-    return {
-      ok: true,
-      payouts,
-      meta: {
-        buyIn,
-        feePct,
-        mode,
-        totalPotDollars,
-        feeDollars,
-        potAfterFeeDollars,
-        collectiveWeightsUsed: base,
-      },
-    };
-  }
-
-  async function postPayoutsToLeaderboard() {
-    if (!finalized) return;
-
-    await requireAdmin(async () => {
-      if (!payoutConfig.enabled) return alert("Payouts are disabled.");
-
-      const result = computeAllPayoutsDollars();
-      if (!result.ok)
-        return alert(result.reason || "Unable to compute payouts.");
-
-      const ok = window.confirm(
-        "Post payouts to the leaderboard?\n\nThis will write FULL DOLLAR amounts next to the winning players."
-      );
-      if (!ok) return;
-
-      await updatePutting({ payoutsPosted: result.payouts });
-      alert("Payouts posted ✅");
-    });
-  }
-
-  async function togglePayoutsEnabled() {
-    await requireAdmin(async () => {
-      const next = !payoutConfig.enabled;
-
-      if (!next) {
-        await updatePutting({
-          payoutConfig: {
-            ...payoutConfig,
-            enabled: false,
-            updatedAt: Date.now(),
-          },
-          payoutsPosted: {},
-        });
-        setPayoutsOpen(false);
-        alert("Payouts disabled (posted payouts cleared).");
-        return;
-      }
-
-      await updatePutting({
-        payoutConfig: { ...payoutConfig, enabled: true, updatedAt: Date.now() },
-        payoutsPosted: {},
-      });
-
-      alert("Payouts enabled ✅");
-    });
-  }
-
-  const hasPostedPayouts =
-    payoutsEnabled && Object.keys(payoutsPosted || {}).length > 0;
-
-  // ---- Missing league guard ----
-  if (!leagueId) {
-    return (
-      <div>
-        <Header />
-        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
-          <h2>Putting League</h2>
-          <p style={{ opacity: 0.8 }}>
-            No league selected. Go back and enter a league code.
-          </p>
-          <NavLink to="/" style={{ fontWeight: 900 }}>
-            ← Back to League Search
-          </NavLink>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div>
-        <Header />
-        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
-          <p>Loading league…</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (loadError) {
-    return (
-      <div>
-        <Header />
-        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
-          <p style={{ color: "#b00020", fontWeight: 900 }}>{loadError}</p>
-          <NavLink to="/" style={{ fontWeight: 900 }}>
-            ← Back to League Search
-          </NavLink>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Mode-aware “status” block ----------
-  let statusLine = "";
-  if (finalized) statusLine = "FINALIZED (locked)";
-  else if (playMode === "simultaneous") {
-    statusLine = roundStartedSim
-      ? `Round ${currentRound} of ${totalRounds}`
-      : "Not started";
-  } else {
-    statusLine = seqFormatLocked ? "Check-in open (Sequential)" : "Not started";
-    if (seqFormatLocked && seqCheckInLocked)
-      statusLine = "Check-in locked (Sequential)";
-  }
-
-  // ---------- Simultaneous admin stats ----------
-  const submitStatsSim = roundStartedSim
-    ? submittedCountForRound(currentRound)
-    : { submitted: 0, total: 0 };
-  const missingCardsThisRoundSim = roundStartedSim
-    ? missingCardsForRound(currentRound)
-    : [];
-
-  const canBeginNextRound =
-    roundStartedSim &&
-    !finalized &&
-    currentRound < totalRounds &&
-    allCardsSubmittedForRound(currentRound);
-
-  const canFinalize =
-    roundStartedSim &&
-    !finalized &&
-    currentRound === totalRounds &&
-    allCardsSubmittedForRound(currentRound);
-
-  const showCardModeButtons =
-    playMode === "simultaneous" &&
-    !roundStartedSim &&
-    !finalized &&
-    players.length >= 2;
-
-  // ---------- Render ----------
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: `linear-gradient(180deg, ${COLORS.blueLight} 0%, #ffffff 60%)`,
-        display: "flex",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <div style={{ width: "100%", maxWidth: 760 }}>
-        <div
-          style={{
-            textAlign: "center",
-            background: COLORS.panel,
-            borderRadius: 18,
-            padding: 26,
-            border: `2px solid ${COLORS.navy}`,
-            boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
-          }}
-        >
-          <Header />
-
-          <div
-            style={{
-              marginTop: 10,
-              fontSize: 12,
-              opacity: 0.7,
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-              gap: 8,
-              flexWrap: "wrap",
-            }}
-          >
-            <span>
-              League: <strong>{leagueId}</strong>
-            </span>
-            <span style={{ opacity: 0.6 }}>•</span>
-            <NavLink
-              to={`/league/${encodeURIComponent(leagueId)}`}
-              style={{
-                fontWeight: 900,
-                color: COLORS.navy,
-                textDecoration: "none",
-                opacity: 1,
-              }}
-            >
-              Back to League
-            </NavLink>
-          </div>
-
-          <div
-            style={{
-              color: COLORS.green,
-              marginTop: 14,
-              marginBottom: 12,
-              fontWeight: 900,
-            }}
-          >
-            Putting League —{" "}
-            <span style={{ color: COLORS.navy }}>
-              {playMode === "simultaneous"
-                ? "Simultaneous Mode"
-                : "Sequential Mode"}
-            </span>
-            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
-              {poolMode === "combined" ? "Combined Pool" : "Split Pool"}
-              {" • "}
-              {statusLine}
-            </div>
-            {finalized ? (
-              <div style={{ marginTop: 6, color: COLORS.red, fontWeight: 900 }}>
-                FINALIZED (locked)
-              </div>
-            ) : null}
-          </div>
-
-          {/* Simultaneous-only admin status */}
-          {playMode === "simultaneous" && roundStartedSim && (
-            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 14 }}>
-              <div>
-                Admin Status: Cards submitted this round —{" "}
-                <strong>
-                  {submitStatsSim.submitted} / {submitStatsSim.total}
-                </strong>
-              </div>
-
-              {missingCardsThisRoundSim.length > 0 ? (
-                <div style={{ marginTop: 6 }}>
-                  Waiting on:{" "}
-                  <strong style={{ color: COLORS.red }}>
-                    {missingCardsThisRoundSim.map((c) => c.name).join(", ")}
-                  </strong>
-                </div>
-              ) : (
-                <div
-                  style={{ marginTop: 6, color: COLORS.green, fontWeight: 900 }}
-                >
-                  All cards submitted ✅
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ADMIN TOOLS */}
-          <div
-            style={{
-              border: `1px solid ${COLORS.border}`,
-              borderRadius: 14,
-              background: COLORS.soft,
-              padding: 12,
-              textAlign: "left",
-              marginBottom: 12,
-            }}
-          >
-            <div
-              onClick={() => setSetupOpen((v) => !v)}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                cursor: "pointer",
-                gap: 10,
-              }}
-            >
-              <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                Admin Tools
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                {setupOpen ? "Tap to collapse" : "Tap to expand"}
-              </div>
-            </div>
-
-            {setupOpen && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ display: "grid", gap: 10 }}>
-                  {/* Mode selector (restored simple selector style) */}
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 900,
-                        color: COLORS.navy,
-                        marginBottom: 6,
-                      }}
-                    >
-                      Format Mode
-                    </div>
-                    <select
-                      value={playMode}
-                      disabled={finalized || roundStartedSim || seqFormatLocked}
-                      onChange={(e) => setPlayMode(e.target.value)}
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                        background: "#fff",
-                      }}
-                      title={
-                        finalized
-                          ? "Finalized"
-                          : roundStartedSim || seqFormatLocked
-                          ? "Format is locked"
-                          : "Choose Simultaneous or Sequential"
-                      }
-                    >
-                      <option value="simultaneous">
-                        Simultaneous Stations
-                      </option>
-                      <option value="sequential">Sequential Stations</option>
-                    </select>
-                    {(roundStartedSim || seqFormatLocked) && (
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                        Format is locked for this league run.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Pool mode selector */}
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 900,
-                        color: COLORS.navy,
-                        marginBottom: 6,
-                      }}
-                    >
-                      Pool Mode
-                    </div>
-                    <select
-                      value={poolMode}
-                      disabled={
-                        finalized ||
-                        roundStartedSim ||
-                        seqFormatLocked ||
-                        players.length > 0
-                      }
-                      onChange={(e) => setPoolMode(e.target.value)}
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                        background: "#fff",
-                      }}
-                      title={
-                        players.length > 0
-                          ? "Pool mode can only be changed before check-in starts."
-                          : "Split = A/B/C pools. Combined = one leaderboard."
-                      }
-                    >
-                      <option value="split">Split Pool (A/B/C)</option>
-                      <option value="combined">
-                        Combined Pool (All players)
-                      </option>
-                    </select>
-                    {players.length > 0 && (
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                        Pool mode is locked once players are checked in.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Stations (1–18) */}
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 900,
-                        color: COLORS.navy,
-                        marginBottom: 6,
-                      }}
-                    >
-                      Stations
-                    </div>
-                    <select
-                      value={stations}
-                      disabled={finalized || roundStartedSim || seqFormatLocked}
-                      onChange={(e) =>
-                        updatePutting({
-                          settings: {
-                            ...settings,
-                            stations: Number(e.target.value),
-                          },
-                        })
-                      }
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                        background: "#fff",
-                      }}
-                    >
-                      {Array.from({ length: 18 }, (_, i) => i + 1).map((n) => (
-                        <option key={n} value={n}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Rounds */}
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 900,
-                        color: COLORS.navy,
-                        marginBottom: 6,
-                      }}
-                    >
-                      Rounds
-                    </div>
-                    <select
-                      value={totalRounds}
-                      disabled={finalized || roundStartedSim || seqFormatLocked}
-                      onChange={(e) =>
-                        updatePutting({
-                          settings: {
-                            ...settings,
-                            rounds: Number(e.target.value),
-                          },
-                        })
-                      }
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                        background: "#fff",
-                      }}
-                    >
-                      {Array.from({ length: 5 }, (_, i) => i + 1).map((n) => (
-                        <option key={n} value={n}>
-                          {n}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Mode-specific start buttons */}
-                  {playMode === "simultaneous" ? (
-                    !roundStartedSim ? (
-                      <button
-                        onClick={beginRoundOneSimultaneous}
-                        style={{
-                          ...buttonStyle,
-                          width: "100%",
-                          background: COLORS.green,
-                          color: "white",
-                          border: `1px solid ${COLORS.green}`,
-                        }}
-                        disabled={finalized}
-                        title="Requires admin password. Locks format and begins Round 1."
-                      >
-                        Begin Round 1 (Lock Format)
-                      </button>
-                    ) : (
-                      <div style={{ fontSize: 12, opacity: 0.75 }}>
-                        Format locked (Simultaneous).
-                      </div>
-                    )
-                  ) : !seqFormatLocked ? (
-                    <button
-                      onClick={lockFormatAndOpenCheckInSequential}
-                      style={{
-                        ...buttonStyle,
-                        width: "100%",
-                        background: COLORS.green,
-                        color: "white",
-                        border: `1px solid ${COLORS.green}`,
-                      }}
-                      disabled={finalized}
-                      title="Requires admin password. Locks format and opens check-in."
-                    >
-                      Lock Format and Open Check-In
-                    </button>
-                  ) : (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Format locked (Sequential).
-                    </div>
-                  )}
-
-                  {/* Simultaneous-only next/finalize */}
-                  {playMode === "simultaneous" && canBeginNextRound && (
-                    <button
-                      onClick={beginNextRoundSimultaneous}
-                      style={{
-                        ...buttonStyle,
-                        width: "100%",
-                        background: COLORS.navy,
-                        color: "white",
-                        border: `1px solid ${COLORS.navy}`,
-                      }}
-                      title="Requires admin password. Only appears after every card submits."
-                    >
-                      Begin Next Round (Auto Cards)
-                    </button>
-                  )}
-
-                  {playMode === "simultaneous" && canFinalize && (
-                    <button
-                      onClick={finalizeScoresSimultaneous}
-                      style={{
-                        ...buttonStyle,
-                        width: "100%",
-                        background: COLORS.red,
-                        color: "white",
-                        border: `1px solid ${COLORS.red}`,
-                      }}
-                      title="Only available after all cards submit on final round."
-                    >
-                      Finalize Scores (Lock)
-                    </button>
-                  )}
-
-                  {/* Sequential-only check-in lock + finalize */}
-                  {playMode === "sequential" &&
-                    seqFormatLocked &&
-                    !seqCheckInLocked &&
-                    !finalized && (
-                      <button
-                        onClick={lockCheckInSequential}
-                        style={{
-                          ...buttonStyle,
-                          width: "100%",
-                          background: COLORS.navy,
-                          color: "white",
-                          border: `1px solid ${COLORS.navy}`,
-                        }}
-                        title="Requires admin password. Prevents new players from checking in."
-                      >
-                        Lock Check-In
-                      </button>
-                    )}
-
-                  {playMode === "sequential" &&
-                    seqFormatLocked &&
-                    !finalized && (
-                      <button
-                        onClick={finalizeLeaderboardSequential}
-                        style={{
-                          ...buttonStyle,
-                          width: "100%",
-                          background: COLORS.red,
-                          color: "white",
-                          border: `1px solid ${COLORS.red}`,
-                        }}
-                        title="Requires admin password. Locks all scoring and finalizes leaderboards."
-                      >
-                        Finalize Leaderboard (Lock)
-                      </button>
-                    )}
-
-                  {/* Leaderboard Adjust Tool (ADMIN REQUIRED) */}
-                  <button
-                    onClick={openAdjustmentsEditor}
-                    style={{
-                      ...smallButtonStyle,
-                      width: "100%",
-                      background: "#fff",
-                      border: `1px solid ${COLORS.navy}`,
-                      color: COLORS.navy,
-                    }}
-                    disabled={finalized || players.length === 0}
-                    title="Requires admin password. Adjust leaderboard totals before finalize."
-                  >
-                    {adjustOpen
-                      ? "Close Leaderboard Edit"
-                      : "Edit Leaderboard Scores"}
-                  </button>
-
-                  {/* Enable/Disable payouts toggle */}
-                  <button
-                    onClick={togglePayoutsEnabled}
-                    style={{
-                      ...smallButtonStyle,
-                      width: "100%",
-                      background: payoutsEnabled ? COLORS.green : "#fff",
-                      color: payoutsEnabled ? "white" : COLORS.navy,
-                      border: `1px solid ${
-                        payoutsEnabled ? COLORS.green : COLORS.navy
-                      }`,
-                      fontWeight: 900,
-                    }}
-                    disabled={players.length === 0}
-                    title="Requires admin password. Turning off clears posted payouts."
-                  >
-                    Enable Payouts: {payoutsEnabled ? "On" : "Off"}
-                  </button>
-
-                  {payoutsEnabled && (
-                    <>
-                      <button
-                        onClick={() =>
-                          requireAdmin(async () => {
-                            if (
-                              !putting.payoutConfig ||
-                              typeof putting.payoutConfig !== "object"
-                            ) {
-                              await updatePutting({
-                                payoutConfig: {
-                                  ...DEFAULT_PAYOUT_CONFIG,
-                                  enabled: true,
-                                },
-                                payoutsPosted: {},
-                              });
-                            }
-                            setPayoutsOpen((v) => !v);
-                          })
-                        }
-                        style={{
-                          ...smallButtonStyle,
-                          width: "100%",
-                          background: "#fff",
-                          border: `1px solid ${COLORS.navy}`,
-                          color: COLORS.navy,
-                        }}
-                        disabled={players.length === 0}
-                        title="Requires admin password."
-                      >
-                        {payoutsOpen
-                          ? "Close Payout Configuration"
-                          : "Configure Payouts"}
-                      </button>
-
-                      {payoutsOpen && (
-                        <div
-                          style={{
-                            border: `1px solid ${COLORS.border}`,
-                            borderRadius: 12,
-                            background: "#fff",
-                            padding: 12,
-                            marginTop: 0,
-                            display: "grid",
-                            gap: 10,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              color: COLORS.navy,
-                            }}
-                          >
-                            Payout Configuration
-                          </div>
-
-                          <label
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              textAlign: "left",
-                            }}
-                          >
-                            Buy-In ($)
-                            <select
-                              value={clampInt(
-                                payoutConfig?.buyInDollars ?? 0,
-                                0,
-                                50
-                              )}
-                              onChange={(e) =>
-                                updatePuttingDot(
-                                  "payoutConfig.buyInDollars",
-                                  clampInt(e.target.value, 0, 50)
-                                )
-                              }
-                              style={{
-                                ...inputStyle,
-                                width: "100%",
-                                marginTop: 6,
-                                background: "#fff",
-                              }}
-                            >
-                              {Array.from({ length: 51 }, (_, i) => i).map(
-                                (n) => (
-                                  <option key={n} value={n}>
-                                    {n}
-                                  </option>
-                                )
-                              )}
-                            </select>
-                          </label>
-
-                          <label
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              textAlign: "left",
-                            }}
-                          >
-                            League Fee (%)
-                            <select
-                              value={clampInt(
-                                payoutConfig?.leagueFeePct ?? 0,
-                                0,
-                                50
-                              )}
-                              onChange={(e) =>
-                                updatePuttingDot(
-                                  "payoutConfig.leagueFeePct",
-                                  clampInt(e.target.value, 0, 50)
-                                )
-                              }
-                              style={{
-                                ...inputStyle,
-                                width: "100%",
-                                marginTop: 6,
-                                background: "#fff",
-                              }}
-                            >
-                              {Array.from({ length: 51 }, (_, i) => i).map(
-                                (n) => (
-                                  <option key={n} value={n}>
-                                    {n}
-                                  </option>
-                                )
-                              )}
-                            </select>
-                          </label>
-
-                          <label
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              textAlign: "left",
-                            }}
-                          >
-                            Payout Mode
-                            <select
-                              value={
-                                poolMode === "combined"
-                                  ? "pool"
-                                  : payoutConfig?.mode ?? ""
-                              }
-                              onChange={(e) =>
-                                updatePuttingDot(
-                                  "payoutConfig.mode",
-                                  e.target.value
-                                )
-                              }
-                              style={{
-                                ...inputStyle,
-                                width: "100%",
-                                background: "#fff",
-                                marginTop: 6,
-                              }}
-                              disabled={poolMode === "combined"}
-                              title={
-                                poolMode === "combined"
-                                  ? "Combined Pool forces 'By Pool' payouts."
-                                  : ""
-                              }
-                            >
-                              <option value="">Select mode…</option>
-                              <option value="pool">
-                                {poolMode === "combined"
-                                  ? "By Pool (All Players)"
-                                  : "By Pool"}
-                              </option>
-                              {poolMode !== "combined" && (
-                                <option value="collective">Collective</option>
-                              )}
-                            </select>
-                          </label>
-
-                          <button
-                            onClick={() =>
-                              requireAdmin(async () => {
-                                const buyInOk = clampInt(
-                                  payoutConfig?.buyInDollars,
-                                  0,
-                                  50
-                                );
-                                const feeOk = clampInt(
-                                  payoutConfig?.leagueFeePct,
-                                  0,
-                                  50
-                                );
-
-                                let modeOk =
-                                  payoutConfig?.mode === "pool" ||
-                                  payoutConfig?.mode === "collective"
-                                    ? payoutConfig.mode
-                                    : "";
-
-                                if (poolMode === "combined") modeOk = "pool";
-
-                                if (!modeOk) {
-                                  alert(
-                                    'Select a payout mode ("By Pool" or "Collective").'
-                                  );
-                                  return;
-                                }
-
-                                await updatePutting({
-                                  payoutConfig: {
-                                    enabled: true,
-                                    buyInDollars: buyInOk,
-                                    leagueFeePct: feeOk,
-                                    mode: modeOk,
-                                    updatedAt: Date.now(),
-                                  },
-                                  payoutsPosted: {},
-                                });
-
-                                setPayoutsOpen(false);
-                                alert("Payouts saved ✅");
-                              })
-                            }
-                            style={{
-                              ...buttonStyle,
-                              background: COLORS.green,
-                              color: "white",
-                              border: `1px solid ${COLORS.green}`,
-                              width: "100%",
-                            }}
-                          >
-                            Save Payout Configuration
-                          </button>
-
-                          <div
-                            style={{
-                              fontSize: 12,
-                              opacity: 0.75,
-                              textAlign: "left",
-                            }}
-                          >
-                            Tip: This clears previously posted payouts (if any).
-                          </div>
-                        </div>
-                      )}
-
-                      <button
-                        onClick={postPayoutsToLeaderboard}
-                        style={{
-                          ...smallButtonStyle,
-                          width: "100%",
-                          background: "#fff",
-                          border: `2px solid ${COLORS.red}`,
-                          color: COLORS.red,
-                          fontWeight: 900,
-                        }}
-                        disabled={!finalized || !payoutsEnabled}
-                        title={
-                          !finalized
-                            ? "Only available after Finalize."
-                            : !payoutsEnabled
-                            ? "Enable payouts first."
-                            : "Requires admin password."
-                        }
-                      >
-                        Post Payouts to Leaderboard
-                      </button>
-
-                      <div style={{ fontSize: 12, opacity: 0.75 }}>
-                        Payouts:{" "}
-                        <strong>
-                          {`$${clampInt(
-                            payoutConfig.buyInDollars,
-                            0,
-                            50
-                          )} buy-in • ${clampInt(
-                            payoutConfig.leagueFeePct,
-                            0,
-                            50
-                          )}% fee • ${
-                            poolMode === "combined"
-                              ? "By Pool"
-                              : payoutConfig.mode === "pool"
-                              ? "By Pool"
-                              : "Collective"
-                          }`}
-                        </strong>
-                        {finalized ? (
-                          <span style={{ marginLeft: 8 }}>
-                            • Posted:{" "}
-                            <strong
-                              style={{
-                                color: hasPostedPayouts
-                                  ? COLORS.green
-                                  : COLORS.red,
-                              }}
-                            >
-                              {hasPostedPayouts ? "Yes" : "No"}
-                            </strong>
-                          </span>
-                        ) : null}
-                      </div>
-                    </>
-                  )}
-
-                  {adjustOpen && !finalized && (
-                    <div
-                      style={{
-                        border: `1px solid ${COLORS.border}`,
-                        borderRadius: 12,
-                        background: "#fff",
-                        padding: 10,
-                      }}
-                    >
-                      <div
-                        style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
-                      >
-                        Set a player’s <strong>final leaderboard total</strong>.
-                        This creates an adjustment. Disabled after Finalize.
-                      </div>
-
-                      <div style={{ display: "grid", gap: 8 }}>
-                        {players.map((p) => {
-                          const base =
-                            playMode === "sequential"
-                              ? cumulativeBaseTotalForPlayerSeq(p.id)
-                              : cumulativeBaseTotalForPlayerSim(p.id);
-
-                          const adj = Number(adjustments?.[p.id] ?? 0) || 0;
-                          const total = base + adj;
-
-                          return (
-                            <div
-                              key={p.id}
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "1fr auto",
-                                gap: 10,
-                                alignItems: "center",
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: `1px solid ${COLORS.border}`,
-                                background: COLORS.soft,
-                              }}
-                            >
-                              <div style={{ minWidth: 0 }}>
-                                <div
-                                  style={{
-                                    fontWeight: 900,
-                                    color: COLORS.text,
-                                  }}
-                                >
-                                  {p.name}{" "}
-                                  <span style={{ fontSize: 12, opacity: 0.7 }}>
-                                    {poolMode === "combined"
-                                      ? "(Combined)"
-                                      : `(${
-                                          p.pool === "B"
-                                            ? "B"
-                                            : p.pool === "C"
-                                            ? "C"
-                                            : "A"
-                                        } Pool)`}
-                                  </span>
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    opacity: 0.75,
-                                    marginTop: 2,
-                                  }}
-                                >
-                                  Base: <strong>{base}</strong> • Adj:{" "}
-                                  <strong
-                                    style={{
-                                      color: adj ? COLORS.red : COLORS.navy,
-                                    }}
-                                  >
-                                    {adj}
-                                  </strong>{" "}
-                                  • Final: <strong>{total}</strong>
-                                </div>
-                              </div>
-
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: 8,
-                                  alignItems: "center",
-                                }}
-                              >
-                                <input
-                                  type="number"
-                                  value={String(total)}
-                                  onChange={(e) =>
-                                    setFinalLeaderboardTotal(
-                                      p.id,
-                                      e.target.value
-                                    )
-                                  }
-                                  style={{
-                                    ...inputStyle,
-                                    width: 96,
-                                    textAlign: "center",
-                                    background: "#fff",
-                                    fontWeight: 900,
-                                  }}
-                                  title="Requires admin password"
-                                />
-                                <button
-                                  onClick={() => clearAdjustment(p.id)}
-                                  style={{
-                                    ...smallButtonStyle,
-                                    background: "#fff",
-                                    border: `1px solid ${COLORS.border}`,
-                                    fontWeight: 900,
-                                  }}
-                                  title="Requires admin password"
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={async () => {
-                      await requireAdmin(async () => {
-                        const ok = window.confirm(
-                          "Reset PUTTING league only?\n\nThis clears putting players, cards, scores, settings, leaderboard adjustments, and payout settings.\n(Tag rounds will NOT be affected.)"
-                        );
-                        if (!ok) return;
-
-                        await updateDoc(leagueRef, {
-                          puttingLeague: {
-                            settings: {
-                              stations: 1,
-                              rounds: 1,
-                              finalized: false,
-
-                              playMode: "simultaneous",
-                              poolMode: "split",
-
-                              locked: false,
-                              currentRound: 0,
-                              cardMode: "",
-
-                              seqFormatLocked: false,
-                              seqCheckInLocked: false,
-                            },
-
-                            players: [],
-                            adjustments: {},
-                            payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-                            payoutsPosted: {},
-
-                            cardsByRound: {},
-                            scores: {},
-                            submitted: {},
-
-                            seqCards: [],
-                            seqRoundScores: {},
-                            seqSubmitted: {},
-                            seqPlayerRounds: {},
-                          },
-                        });
-
-                        setActiveCardId("");
-                        setOpenStations({});
-                        setSelectedForCard([]);
-                        setCardName("");
-                        setName("");
-                        setPool("A");
-                        setSetupOpen(false);
-                        setCheckinOpen(true);
-                        setCardsOpen(true);
-                        setLeaderboardsOpen(false);
-                        setAdjustOpen(false);
-                        setPayoutsOpen(false);
-
-                        setSeqSelectedForCard([]);
-                        setSeqCardName("");
-                        setSeqOpenCardIds({});
-                      });
-                    }}
-                    style={{
-                      ...smallButtonStyle,
-                      width: "100%",
-                      background: "#fff",
-                      border: `1px solid ${COLORS.border}`,
-                    }}
-                    title="Requires admin password."
-                  >
-                    Reset Putting League
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* CHECK-IN (Mode-aware gating; stays present in Sequential) */}
-          {(playMode === "simultaneous" ? !roundStartedSim : true) && (
-            <div
-              style={{
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: COLORS.soft,
-                padding: 12,
-                textAlign: "left",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                onClick={() => setCheckinOpen((v) => !v)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  cursor: "pointer",
-                  gap: 10,
-                }}
-              >
-                <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                  Player Check-In ({players.length})
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {checkinOpen ? "Tap to collapse" : "Tap to expand"}
-                </div>
-              </div>
-
-              {checkinOpen && (
-                <div style={{ marginTop: 10 }}>
-                  {playMode === "sequential" && !seqFormatLocked ? (
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      Check-in is closed until the admin clicks{" "}
-                      <strong>Lock Format and Open Check-In</strong>.
-                    </div>
-                  ) : null}
-
-                  {playMode === "sequential" && seqCheckInLocked ? (
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      Check-in is <strong>locked</strong>. No new players can be
-                      added.
-                    </div>
-                  ) : null}
-
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 10,
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      marginTop: 10,
-                    }}
-                  >
-                    <input
-                      placeholder="Player name"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      style={{ ...inputStyle, width: 240 }}
-                      disabled={
-                        finalized ||
-                        (playMode === "simultaneous"
-                          ? false
-                          : !seqFormatLocked || seqCheckInLocked)
-                      }
-                    />
-
-                    {poolMode === "split" ? (
-                      <select
-                        value={pool}
-                        onChange={(e) => setPool(e.target.value)}
-                        style={{
-                          ...inputStyle,
-                          width: 140,
-                          background: "#fff",
-                        }}
-                        disabled={
-                          finalized ||
-                          (playMode === "simultaneous"
-                            ? false
-                            : !seqFormatLocked || seqCheckInLocked)
-                        }
-                      >
-                        <option value="A">A Pool</option>
-                        <option value="B">B Pool</option>
-                        <option value="C">C Pool</option>
-                      </select>
-                    ) : null}
-
-                    <button
-                      onClick={addPlayer}
-                      style={{
-                        ...smallButtonStyle,
-                        background: COLORS.green,
-                        color: "white",
-                        border: `1px solid ${COLORS.green}`,
-                      }}
-                      disabled={
-                        finalized ||
-                        (playMode === "sequential" &&
-                          (!seqFormatLocked || seqCheckInLocked))
-                      }
-                    >
-                      Add
-                    </button>
-                  </div>
-
-                  {players.length ? (
-                    <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                      {players.map((p) => (
-                        <div
-                          key={p.id}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "#fff",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                          }}
-                        >
-                          <div style={{ fontWeight: 900, color: COLORS.text }}>
-                            {p.name}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 900,
-                              color: COLORS.navy,
-                            }}
-                          >
-                            {poolMode === "combined"
-                              ? "Combined"
-                              : p.pool === "B"
-                              ? "B Pool"
-                              : p.pool === "C"
-                              ? "C Pool"
-                              : "A Pool"}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                      Add players as they arrive.
-                    </div>
-                  )}
-
-                  {/* SIMULTANEOUS: card mode buttons */}
-                  {showCardModeButtons && (
-                    <div
-                      style={{
-                        marginTop: 12,
-                        border: `1px solid ${COLORS.border}`,
-                        borderRadius: 12,
-                        background: "#fff",
-                        padding: 10,
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: 12,
-                          opacity: 0.85,
-                          marginBottom: 10,
-                        }}
-                      >
-                        Next: Create Round 1 cards
-                      </div>
-
-                      <div style={{ display: "grid", gap: 10 }}>
-                        <button
-                          onClick={setCardModeManual}
-                          style={{
-                            ...buttonStyle,
-                            width: "100%",
-                            background: "#fff",
-                            border: `1px solid ${COLORS.navy}`,
-                            color: COLORS.navy,
-                          }}
-                        >
-                          Manually Create Cards
-                        </button>
-
-                        <button
-                          onClick={randomizeRound1Cards}
-                          style={{
-                            ...buttonStyle,
-                            width: "100%",
-                            background: COLORS.navy,
-                            color: "white",
-                            border: `1px solid ${COLORS.navy}`,
-                          }}
-                        >
-                          Randomize Cards
-                        </button>
-
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                          Cards are created using sizes 2–4 only (no 1-player
-                          cards).
-                        </div>
-
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                          Current mode:{" "}
-                          <strong>
-                            {cardMode === "manual"
-                              ? "Manual"
-                              : cardMode === "random"
-                              ? "Random"
-                              : "Not chosen"}
-                          </strong>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* SEQUENTIAL: quick card formation lives here */}
-                  {playMode === "sequential" && seqFormatLocked && (
-                    <div
-                      style={{
-                        marginTop: 12,
-                        border: `1px solid ${COLORS.border}`,
-                        borderRadius: 12,
-                        background: "#fff",
-                        padding: 10,
-                      }}
-                    >
-                      <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                        Form a Card (Sequential Mode)
-                      </div>
-                      <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
-                        Select 2–4 unassigned players, then create a card.
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop: 10,
-                          display: "flex",
-                          gap: 10,
-                          flexWrap: "wrap",
-                          alignItems: "center",
-                        }}
-                      >
-                        <input
-                          placeholder="Card name (optional)"
-                          value={seqCardName}
-                          onChange={(e) => setSeqCardName(e.target.value)}
-                          style={{ ...inputStyle, width: 240 }}
-                          disabled={finalized}
-                        />
-                        <button
-                          onClick={createCardSequential}
-                          style={{
-                            ...smallButtonStyle,
-                            background: COLORS.navy,
-                            color: "white",
-                            border: `1px solid ${COLORS.navy}`,
-                          }}
-                          disabled={finalized}
-                        >
-                          Create Card
-                        </button>
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                          Selected: <strong>{seqSelectedForCard.length}</strong>{" "}
-                          / 4
-                        </div>
-                      </div>
-
-                      <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                        {(() => {
-                          const assigned = new Set();
-                          seqCards.forEach((c) =>
-                            (c.playerIds || []).forEach((id) =>
-                              assigned.add(id)
-                            )
-                          );
-
-                          const available = players.filter(
-                            (p) => !assigned.has(p.id)
-                          );
-
-                          if (!available.length) {
-                            return (
-                              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                No unassigned players available.
-                              </div>
-                            );
-                          }
-
-                          return available.map((p) => {
-                            const isSelected = seqSelectedForCard.includes(
-                              p.id
-                            );
-                            return (
-                              <label
-                                key={p.id}
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: 10,
-                                  padding: "10px 12px",
-                                  borderRadius: 12,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: COLORS.soft,
-                                  cursor: "pointer",
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 10,
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => toggleSeqSelect(p.id)}
-                                  />
-                                  <div style={{ fontWeight: 900 }}>
-                                    {p.name}
-                                  </div>
-                                </div>
-
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 900,
-                                    color: COLORS.navy,
-                                  }}
-                                >
-                                  {poolMode === "combined"
-                                    ? "Combined"
-                                    : p.pool === "B"
-                                    ? "B Pool"
-                                    : p.pool === "C"
-                                    ? "C Pool"
-                                    : "A Pool"}
-                                </div>
-                              </label>
-                            );
-                          });
-                        })()}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* CARDS (Mode-aware) */}
-          {playMode === "simultaneous" ? (
-            <div
-              style={{
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: COLORS.soft,
-                padding: 12,
-                textAlign: "left",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                onClick={() => setCardsOpen((v) => !v)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  cursor: "pointer",
-                  gap: 10,
-                }}
-              >
-                <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                  Cards — Round {currentRound || 1}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {cardsOpen ? "Tap to collapse" : "Tap to expand"}
-                </div>
-              </div>
-
-              {cardsOpen && (
-                <div style={{ marginTop: 10 }}>
-                  {!roundStartedSim && cardMode === "manual" ? (
-                    <>
-                      <div
-                        style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
-                      >
-                        Create Round 1 cards (2–4 players). Pools can be mixed.
-                      </div>
-
-                      <div
-                        style={{
-                          border: `1px solid ${COLORS.border}`,
-                          background: "#fff",
-                          borderRadius: 12,
-                          padding: 10,
-                          marginBottom: 10,
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: 10,
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                            marginBottom: 10,
-                          }}
-                        >
-                          <input
-                            placeholder="Card name (optional)"
-                            value={cardName}
-                            onChange={(e) => setCardName(e.target.value)}
-                            style={{ ...inputStyle, width: 240 }}
-                            disabled={finalized}
-                          />
-                          <button
-                            onClick={createCardSim}
-                            style={{
-                              ...smallButtonStyle,
-                              background: COLORS.navy,
-                              color: "white",
-                              border: `1px solid ${COLORS.navy}`,
-                            }}
-                            disabled={finalized}
-                          >
-                            Create Card
-                          </button>
-
-                          <div style={{ fontSize: 12, opacity: 0.75 }}>
-                            Selected: <strong>{selectedForCard.length}</strong>{" "}
-                            / 4<span style={{ marginLeft: 8 }}>(min 2)</span>
-                          </div>
-                        </div>
-
-                        <div style={{ display: "grid", gap: 8 }}>
-                          {players.map((p) => {
-                            const isSelected = selectedForCard.includes(p.id);
-                            const already = r1Cards.some((c) =>
-                              (c.playerIds || []).includes(p.id)
-                            );
-
-                            return (
-                              <label
-                                key={p.id}
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: 10,
-                                  padding: "10px 12px",
-                                  borderRadius: 12,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: already ? "#fafafa" : COLORS.soft,
-                                  opacity: already ? 0.6 : 1,
-                                  cursor: already ? "not-allowed" : "pointer",
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 10,
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    disabled={already || finalized}
-                                    onChange={() => toggleSelectForCard(p.id)}
-                                  />
-                                  <div style={{ fontWeight: 900 }}>
-                                    {p.name}
-                                  </div>
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 900,
-                                    color: COLORS.navy,
-                                  }}
-                                >
-                                  {poolMode === "combined"
-                                    ? "Combined"
-                                    : p.pool === "B"
-                                    ? "B Pool"
-                                    : p.pool === "C"
-                                    ? "C Pool"
-                                    : "A Pool"}
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  ) : roundStartedSim && currentRound >= 2 ? (
-                    <div
-                      style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
-                    >
-                      Cards for Round {currentRound} are auto-created based on
-                      Round {currentRound - 1} totals.
-                    </div>
-                  ) : !roundStartedSim ? (
-                    <div
-                      style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}
-                    >
-                      Choose Manual or Random cards above. Round 1 requires all
-                      players be assigned to cards before starting.
-                    </div>
-                  ) : null}
-
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {(Array.isArray(cardsByRound[String(currentRound || 1)])
-                      ? cardsByRound[String(currentRound || 1)]
-                      : []
-                    ).map((c) => (
-                      <div
-                        key={c.id}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 12,
-                          border: `1px solid ${COLORS.border}`,
-                          background: "#fff",
-                        }}
-                      >
-                        <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                          {c.name}
-                          {roundStartedSim && currentRound ? (
-                            <span
-                              style={{
-                                marginLeft: 8,
-                                fontSize: 12,
-                                opacity: 0.75,
-                              }}
-                            >
-                              {submitted?.[String(currentRound)]?.[c.id]
-                                ? "✓ submitted"
-                                : "not submitted"}
-                            </span>
-                          ) : null}
-                        </div>
-                        <div style={{ marginTop: 6, fontSize: 14 }}>
-                          {(c.playerIds || []).map((pid) => {
-                            const p = playerById[pid];
-                            if (!p) return null;
-                            return (
-                              <div
-                                key={pid}
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                }}
-                              >
-                                <span style={{ fontWeight: 800 }}>
-                                  {p.name}
-                                </span>
-                                <span
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 900,
-                                    color: COLORS.navy,
-                                  }}
-                                >
-                                  {poolMode === "combined"
-                                    ? "Combined"
-                                    : p.pool === "B"
-                                    ? "B Pool"
-                                    : p.pool === "C"
-                                    ? "C Pool"
-                                    : "A Pool"}
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            // SEQUENTIAL: cards formed + per-round submission UI
-            <div
-              style={{
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: COLORS.soft,
-                padding: 12,
-                textAlign: "left",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                onClick={() => setSeqCardsOpen((v) => !v)}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  cursor: "pointer",
-                  gap: 10,
-                }}
-              >
-                <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                  Cards Formed ({seqCards.length})
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {seqCardsOpen ? "Tap to collapse" : "Tap to expand"}
-                </div>
-              </div>
-
-              {seqCardsOpen && (
-                <div style={{ marginTop: 10 }}>
-                  {!seqCards.length ? (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      No cards yet. Use the Check-In section to form cards.
-                    </div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 10 }}>
-                      {seqCards.map((c) => {
-                        const open = !!seqOpenCardIds[c.id];
-                        const next = nextRoundForCard(c.id);
-                        const done = next === null;
-
-                        return (
-                          <div
-                            key={c.id}
-                            style={{
-                              border: `1px solid ${COLORS.border}`,
-                              borderRadius: 14,
-                              background: "#fff",
-                              overflow: "hidden",
-                            }}
-                          >
-                            <div
-                              onClick={() =>
-                                setSeqOpenCardIds((prev) => ({
-                                  ...prev,
-                                  [c.id]: !prev[c.id],
-                                }))
-                              }
-                              style={{
-                                padding: "12px 12px",
-                                cursor: "pointer",
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                                gap: 10,
-                                background: COLORS.soft,
-                              }}
-                            >
-                              <div
-                                style={{ fontWeight: 900, color: COLORS.navy }}
-                              >
-                                {c.name}
-                              </div>
-                              <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                {open ? "Tap to collapse" : "Tap to expand"}
-                              </div>
-                            </div>
-
-                            {open && (
-                              <div style={{ padding: 12 }}>
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    opacity: 0.75,
-                                    marginBottom: 10,
-                                  }}
-                                >
-                                  Players
-                                </div>
-
-                                <div style={{ display: "grid", gap: 8 }}>
-                                  {(c.playerIds || []).map((pid) => {
-                                    const p = playerById[pid];
-                                    if (!p) return null;
-                                    return (
-                                      <div
-                                        key={pid}
-                                        style={{
-                                          padding: "10px 12px",
-                                          borderRadius: 12,
-                                          border: `1px solid ${COLORS.border}`,
-                                          background: COLORS.soft,
-                                          display: "flex",
-                                          justifyContent: "space-between",
-                                          alignItems: "center",
-                                        }}
-                                      >
-                                        <div style={{ fontWeight: 900 }}>
-                                          {p.name}
-                                        </div>
-                                        <div
-                                          style={{
-                                            fontSize: 12,
-                                            fontWeight: 900,
-                                            color: COLORS.navy,
-                                          }}
-                                        >
-                                          {poolMode === "combined"
-                                            ? "Combined"
-                                            : p.pool === "B"
-                                            ? "B"
-                                            : p.pool === "C"
-                                            ? "C"
-                                            : "A"}
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-
-                                <div style={{ marginTop: 14 }}>
-                                  <div
-                                    style={{
-                                      fontWeight: 900,
-                                      color: COLORS.navy,
-                                    }}
-                                  >
-                                    {done
-                                      ? "All rounds submitted ✅"
-                                      : `Enter scores for Round ${next}`}
-                                  </div>
-                                  <div
-                                    style={{
-                                      fontSize: 12,
-                                      opacity: 0.75,
-                                      marginTop: 6,
-                                    }}
-                                  >
-                                    Enter each player’s total for the round
-                                    (0–50).
-                                  </div>
-
-                                  {!done && (
-                                    <div
-                                      style={{
-                                        marginTop: 10,
-                                        display: "grid",
-                                        gap: 8,
-                                      }}
-                                    >
-                                      {(c.playerIds || []).map((pid) => {
-                                        const p = playerById[pid];
-                                        if (!p) return null;
-                                        const v = seqScoreValue(next, pid);
-                                        return (
-                                          <div
-                                            key={pid}
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                              alignItems: "center",
-                                              gap: 10,
-                                              padding: "10px 12px",
-                                              borderRadius: 12,
-                                              border: `1px solid ${COLORS.border}`,
-                                              background: COLORS.soft,
-                                            }}
-                                          >
-                                            <div
-                                              style={{
-                                                fontWeight: 900,
-                                                minWidth: 0,
-                                              }}
-                                            >
-                                              {p.name}
-                                            </div>
-
-                                            <select
-                                              value={v === "" ? "" : String(v)}
-                                              onChange={(e) =>
-                                                setSeqRoundScore(
-                                                  next,
-                                                  pid,
-                                                  e.target.value === ""
-                                                    ? ""
-                                                    : Number(e.target.value)
-                                                )
-                                              }
-                                              disabled={finalized}
-                                              style={{
-                                                ...inputStyle,
-                                                width: 96,
-                                                background: "#fff",
-                                                fontWeight: 900,
-                                                textAlign: "center",
-                                              }}
-                                            >
-                                              <option value="">—</option>
-                                              {Array.from(
-                                                { length: 51 },
-                                                (_, i) => i
-                                              ).map((n) => (
-                                                <option key={n} value={n}>
-                                                  {n}
-                                                </option>
-                                              ))}
-                                            </select>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-
-                                  <div style={{ marginTop: 12 }}>
-                                    <button
-                                      onClick={() => submitSeqCardRound(c.id)}
-                                      disabled={finalized || done}
-                                      style={{
-                                        ...buttonStyle,
-                                        width: "100%",
-                                        background: done
-                                          ? "#ddd"
-                                          : COLORS.green,
-                                        color: done ? "#444" : "white",
-                                        border: `1px solid ${
-                                          done ? "#ddd" : COLORS.green
-                                        }`,
-                                      }}
-                                    >
-                                      {done
-                                        ? "Card Complete"
-                                        : next === totalRounds
-                                        ? "Submit Final Round Scores"
-                                        : `Submit Round ${next} Scores`}
-                                    </button>
-
-                                    <div
-                                      style={{
-                                        marginTop: 8,
-                                        fontSize: 12,
-                                        opacity: 0.75,
-                                        textAlign: "center",
-                                      }}
-                                    >
-                                      Submission requires admin password and
-                                      updates the leaderboard.
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* SCOREKEEPER (SIMULTANEOUS ONLY) */}
-          {playMode === "simultaneous" && roundStartedSim ? (
-            <div
-              style={{
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 14,
-                background: "#fff",
-                padding: 12,
-                textAlign: "left",
-                marginBottom: 12,
-              }}
-            >
-              <div
-                style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}
-              >
-                Scorekeeper
-              </div>
-
-              <div
-                style={{
-                  display: "flex",
-                  gap: 10,
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                }}
-              >
-                <select
-                  value={activeCardId}
-                  onChange={(e) => {
-                    setActiveCardId(e.target.value);
-                    setOpenStations({});
-                  }}
-                  style={{ ...inputStyle, width: 280, background: "#fff" }}
-                >
-                  <option value="">Select your card…</option>
-                  {currentCards.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-
-                {activeCardId ? (
-                  <button
-                    onClick={() => {
-                      setActiveCardId("");
-                      setOpenStations({});
-                    }}
-                    style={{ ...smallButtonStyle, background: "#fff" }}
-                  >
-                    Change Card
-                  </button>
-                ) : null}
-              </div>
-
-              {activeCardId ? (
-                (() => {
-                  const card = currentCards.find((c) => c.id === activeCardId);
-                  if (!card) return null;
-
-                  const cardPlayers = (card.playerIds || [])
-                    .map((pid) => playerById[pid])
-                    .filter(Boolean);
-                  const alreadySubmitted =
-                    !!submitted?.[String(currentRound)]?.[card.id];
-
-                  return (
-                    <div style={{ marginTop: 14 }}>
-                      <div
-                        style={{
-                          fontWeight: 900,
-                          color: COLORS.navy,
-                          marginBottom: 10,
-                        }}
-                      >
-                        {card.name}{" "}
-                        {alreadySubmitted ? (
-                          <span style={{ color: COLORS.green, marginLeft: 8 }}>
-                            (submitted)
-                          </span>
-                        ) : (
-                          <span style={{ opacity: 0.6, marginLeft: 8 }}>
-                            (in progress)
-                          </span>
-                        )}
-                      </div>
-
-                      <div style={{ display: "grid", gap: 10 }}>
-                        {Array.from({ length: stations }, (_, i) => i + 1).map(
-                          (stNum) => {
-                            const open = !!openStations[stNum];
-
-                            const stationRows = cardPlayers.map((p) => {
-                              const made = madeFor(currentRound, stNum, p.id);
-                              return {
-                                id: p.id,
-                                name: p.name,
-                                pool: p.pool,
-                                made,
-                                pts: pointsForMade(made ?? 0),
-                              };
-                            });
-
-                            return (
-                              <div
-                                key={stNum}
-                                style={{
-                                  border: `1px solid ${COLORS.border}`,
-                                  borderRadius: 14,
-                                  background: COLORS.soft,
-                                  overflow: "hidden",
-                                }}
-                              >
-                                <div
-                                  onClick={() => toggleStation(stNum)}
-                                  style={{
-                                    padding: "12px 12px",
-                                    cursor: "pointer",
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                    gap: 10,
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      fontWeight: 900,
-                                      color: COLORS.navy,
-                                    }}
-                                  >
-                                    Station {stNum}
-                                  </div>
-                                  <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                    {open ? "Tap to collapse" : "Tap to expand"}
-                                  </div>
-                                </div>
-
-                                {open && (
-                                  <div
-                                    style={{ padding: 12, background: "#fff" }}
-                                  >
-                                    <div
-                                      style={{
-                                        fontSize: 12,
-                                        opacity: 0.75,
-                                        marginBottom: 10,
-                                      }}
-                                    >
-                                      Blank means “not entered yet.” (4=5pts,
-                                      3=3pts, 2=2pts, 1=1pt, 0=0)
-                                    </div>
-
-                                    <div style={{ display: "grid", gap: 8 }}>
-                                      {stationRows.map((row) => (
-                                        <div
-                                          key={row.id}
-                                          style={{
-                                            display: "grid",
-                                            gridTemplateColumns:
-                                              "1fr auto auto",
-                                            alignItems: "center",
-                                            gap: 10,
-                                            padding: "10px 12px",
-                                            borderRadius: 12,
-                                            border: `1px solid ${COLORS.border}`,
-                                            background: COLORS.soft,
-                                            opacity: alreadySubmitted
-                                              ? 0.75
-                                              : 1,
-                                            minWidth: 0,
-                                          }}
-                                        >
-                                          <div style={{ minWidth: 0 }}>
-                                            <div
-                                              style={{
-                                                fontWeight: 900,
-                                                color: COLORS.text,
-                                                overflow: "hidden",
-                                                textOverflow: "ellipsis",
-                                                whiteSpace: "nowrap",
-                                              }}
-                                            >
-                                              {row.name}{" "}
-                                              <span
-                                                style={{
-                                                  fontSize: 12,
-                                                  opacity: 0.75,
-                                                }}
-                                              >
-                                                (
-                                                {poolMode === "combined"
-                                                  ? "ALL"
-                                                  : row.pool === "B"
-                                                  ? "B"
-                                                  : row.pool === "C"
-                                                  ? "C"
-                                                  : "A"}
-                                                )
-                                              </span>
-                                            </div>
-                                          </div>
-
-                                          <select
-                                            value={
-                                              row.made === null
-                                                ? ""
-                                                : String(row.made)
-                                            }
-                                            disabled={
-                                              alreadySubmitted || finalized
-                                            }
-                                            onChange={(e) =>
-                                              setMade(
-                                                currentRound,
-                                                stNum,
-                                                row.id,
-                                                e.target.value === ""
-                                                  ? ""
-                                                  : Number(e.target.value)
-                                              )
-                                            }
-                                            style={{
-                                              ...inputStyle,
-                                              width: 84,
-                                              background: "#fff",
-                                              fontWeight: 900,
-                                              textAlign: "center",
-                                              justifySelf: "end",
-                                            }}
-                                          >
-                                            <option value="">—</option>
-                                            {[0, 1, 2, 3, 4].map((m) => (
-                                              <option key={m} value={m}>
-                                                {m}
-                                              </option>
-                                            ))}
-                                          </select>
-
-                                          <div
-                                            style={{
-                                              textAlign: "right",
-                                              fontWeight: 900,
-                                              color: COLORS.navy,
-                                              justifySelf: "end",
-                                              whiteSpace: "nowrap",
-                                            }}
-                                          >
-                                            {row.pts} pts
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          }
-                        )}
-                      </div>
-
-                      <div style={{ marginTop: 14 }}>
-                        <div
-                          style={{
-                            fontWeight: 900,
-                            color: COLORS.navy,
-                            marginBottom: 8,
-                          }}
-                        >
-                          Round {currentRound} Totals (This Card)
-                        </div>
-
-                        <div style={{ display: "grid", gap: 8 }}>
-                          {cardPlayers.map((p) => {
-                            const total = roundTotalForPlayerSim(
-                              currentRound,
-                              p.id
-                            );
-                            return (
-                              <div
-                                key={p.id}
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: 12,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: "#fff",
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: 10,
-                                }}
-                              >
-                                <div style={{ fontWeight: 900 }}>{p.name}</div>
-                                <div
-                                  style={{
-                                    fontWeight: 900,
-                                    color: COLORS.navy,
-                                  }}
-                                >
-                                  {total} pts
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <div style={{ marginTop: 14 }}>
-                        <button
-                          onClick={() => submitCardScores(card.id)}
-                          disabled={alreadySubmitted || finalized}
-                          style={{
-                            ...buttonStyle,
-                            width: "100%",
-                            background: alreadySubmitted
-                              ? "#ddd"
-                              : COLORS.green,
-                            color: alreadySubmitted ? "#444" : "white",
-                            border: `1px solid ${
-                              alreadySubmitted ? "#ddd" : COLORS.green
-                            }`,
-                          }}
-                        >
-                          {alreadySubmitted
-                            ? "Card Submitted (Locked)"
-                            : "Submit Card Scores"}
-                        </button>
-
-                        <div
-                          style={{
-                            marginTop: 8,
-                            fontSize: 12,
-                            opacity: 0.75,
-                            textAlign: "center",
-                          }}
-                        >
-                          Submitting locks this card for this round.
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()
-              ) : (
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                  Select your card to start scoring.
-                </div>
-              )}
-            </div>
-          ) : null}
-
-          {/* LEADERBOARDS */}
-          <div style={{ textAlign: "left" }}>
-            <div
-              onClick={() => setLeaderboardsOpen((v) => !v)}
-              style={{
-                fontWeight: 900,
-                color: COLORS.navy,
-                marginBottom: 8,
-                cursor: "pointer",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 10,
-                padding: "10px 12px",
-                borderRadius: 14,
-                border: `1px solid ${COLORS.border}`,
-                background: "#fff",
-              }}
-            >
-              <span>
-                Leaderboards{" "}
-                {playMode === "sequential"
-                  ? "(Only Submitted Rounds)"
-                  : "(Cumulative)"}
-                {" — "}
-                {poolMode === "combined" ? "Combined Pool" : "Split Pool"}
-              </span>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>
-                {leaderboardsOpen ? "Tap to hide" : "Tap to show"}
-              </span>
-            </div>
-
-            {leaderboardsOpen && (
-              <div style={{ display: "grid", gap: 10 }}>
-                {(poolMode === "combined" ? ["ALL"] : ["A", "B", "C"]).map(
-                  (k) => {
-                    const label =
-                      k === "ALL"
-                        ? "All Players"
-                        : k === "A"
-                        ? "A Pool"
-                        : k === "B"
-                        ? "B Pool"
-                        : "C Pool";
-
-                    const rows = leaderboardGroups[k] || [];
-                    const ranks = computeTiedRanks(rows);
-
-                    return (
-                      <div
-                        key={k}
-                        style={{
-                          border: `1px solid ${COLORS.border}`,
-                          borderRadius: 14,
-                          background: "#fff",
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            padding: "12px 12px",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                            background: COLORS.soft,
-                          }}
-                        >
-                          <div style={{ fontWeight: 900, color: COLORS.navy }}>
-                            {label}{" "}
-                            <span style={{ fontSize: 12, opacity: 0.75 }}>
-                              ({rows.length})
-                            </span>
-                          </div>
-                        </div>
-
-                        <div style={{ padding: 12 }}>
-                          {rows.length === 0 ? (
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>
-                              No players yet.
-                            </div>
-                          ) : (
-                            <div style={{ display: "grid", gap: 8 }}>
-                              {rows.map((r, idx) => {
-                                const place = ranks[idx] || idx + 1;
-                                const isPaid =
-                                  payoutsEnabled &&
-                                  finalized &&
-                                  hasPostedPayouts &&
-                                  Number(r.payoutDollars || 0) > 0;
-
-                                return (
-                                  <div
-                                    key={r.id}
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: 12,
-                                      border: `1px solid ${COLORS.border}`,
-                                      background: COLORS.soft,
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      alignItems: "center",
-                                      gap: 10,
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        gap: 10,
-                                        alignItems: "center",
-                                        minWidth: 0,
-                                      }}
-                                    >
-                                      <div
-                                        style={{
-                                          width: 34,
-                                          height: 34,
-                                          borderRadius: 12,
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "center",
-                                          fontWeight: 900,
-                                          color: "white",
-                                          background: isPaid
-                                            ? COLORS.green
-                                            : COLORS.navy,
-                                          flexShrink: 0,
-                                        }}
-                                      >
-                                        {place}
-                                      </div>
-
-                                      <div style={{ minWidth: 0 }}>
-                                        <div
-                                          style={{
-                                            fontWeight: 900,
-                                            color: COLORS.text,
-                                            overflow: "hidden",
-                                            textOverflow: "ellipsis",
-                                            whiteSpace: "nowrap",
-                                          }}
-                                        >
-                                          {r.name}
-
-                                          {playMode === "sequential" ? (
-                                            <span
-                                              style={{
-                                                fontSize: 12,
-                                                opacity: 0.75,
-                                                marginLeft: 8,
-                                              }}
-                                            >
-                                              — through R{r.throughRound || 0}
-                                            </span>
-                                          ) : null}
-
-                                          {r.adj ? (
-                                            <span
-                                              style={{
-                                                fontSize: 12,
-                                                marginLeft: 8,
-                                                opacity: 0.75,
-                                              }}
-                                            >
-                                              (adj {r.adj > 0 ? "+" : ""}
-                                              {r.adj})
-                                            </span>
-                                          ) : null}
-
-                                          {payoutsEnabled &&
-                                          finalized &&
-                                          hasPostedPayouts &&
-                                          Number(r.payoutDollars || 0) > 0 ? (
-                                            <span
-                                              style={{
-                                                fontSize: 12,
-                                                marginLeft: 10,
-                                                fontWeight: 900,
-                                                color: COLORS.green,
-                                              }}
-                                            >
-                                              ${Number(r.payoutDollars || 0)}
-                                            </span>
-                                          ) : null}
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    <div
-                                      style={{
-                                        fontWeight: 900,
-                                        color: COLORS.navy,
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {r.total} pts
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  }
-                )}
-              </div>
-            )}
-          </div>
-
-          <div
-            style={{
-              marginTop: 18,
-              fontSize: 12,
-              opacity: 0.65,
-              textAlign: "center",
-            }}
-          >
-            {playMode === "simultaneous"
-              ? "Tip: Round 1 cards must be created before starting. After that, cards are auto-created each round based on the previous round’s totals."
-              : "Sequential workflow: Admin locks format → check-in stays open while cards play → cards submit round scores → admin locks check-in → finalize leaderboard."}
-          </div>
-
-          <div
-            style={{
-              marginTop: 14,
-              fontSize: 12,
-              opacity: 0.55,
-              textAlign: "center",
-            }}
-          >
-            {APP_VERSION} • Developed by Eli Morgan
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+        if (p.pool === "B") pools.B
