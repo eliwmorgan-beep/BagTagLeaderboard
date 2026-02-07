@@ -291,6 +291,9 @@ export default function PuttingPage() {
     return doc(db, "leagues", leagueId);
   }, [leagueId]);
 
+  // ✅ Back to League (mirrors Tags page behavior)
+  const backToLeaguePath = useMemo(() => `/league/${leagueId}`, [leagueId]);
+
   // Putting league stored data
   const [putting, setPutting] = useState({
     settings: {
@@ -1328,6 +1331,25 @@ export default function PuttingPage() {
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
             League: <strong>{leagueId}</strong>
+          </div>
+
+          {/* ✅ Back to League button (mirrors Tags page behavior) */}
+          <div style={{ marginTop: 10, display: "flex", justifyContent: "center" }}>
+            <NavLink
+              to={backToLeaguePath}
+              style={{
+                fontWeight: 900,
+                textDecoration: "none",
+                color: COLORS.navy,
+                border: `1px solid ${COLORS.border}`,
+                background: "#fff",
+                padding: "8px 12px",
+                borderRadius: 12,
+                display: "inline-block",
+              }}
+            >
+              ← Back to League
+            </NavLink>
           </div>
 
           <div
