@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import { doc, getDoc } from "firebase/firestore";
@@ -29,21 +29,18 @@ export default function HomePage() {
     color: "#1a1a1a",
   };
 
-  // Modal state
-  const [showLeagueDialog, setShowLeagueDialog] = useState(false);
+  const inputStyle = {
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid #ccc",
+    fontSize: 14,
+    width: "100%",
+    maxWidth: 320,
+  };
+
   const [leagueIdInput, setLeagueIdInput] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState("");
-
-  function openLeagueDialog() {
-    setJoinError("");
-    setLeagueIdInput("");
-    setShowLeagueDialog(true);
-  }
-
-  function closeLeagueDialog() {
-    setShowLeagueDialog(false);
-  }
 
   async function handleJoinLeague(e) {
     e.preventDefault();
@@ -60,7 +57,7 @@ export default function HomePage() {
     try {
       await ensureAnonAuth();
 
-      // Look up the league doc
+      // Join-only: league must already exist
       const leagueRef = doc(db, "leagues", leagueId);
       const snap = await getDoc(leagueRef);
 
@@ -69,8 +66,6 @@ export default function HomePage() {
         return;
       }
 
-      // Success -> go to league page
-      setShowLeagueDialog(false);
       navigate(`/league/${encodeURIComponent(leagueId)}`);
     } catch (err) {
       console.error(err);
@@ -93,134 +88,53 @@ export default function HomePage() {
       <div style={{ width: "100%", maxWidth: 760 }}>
         <Header />
 
-        <div style={{ marginTop: 14, textAlign: "center" }}>
-          <div
+        <div style={{ marginTop: 18, textAlign: "center" }}>
+          <h1 style={{ margin: 0 }}>Join a League</h1>
+          <div style={{ marginTop: 6, opacity: 0.8, fontSize: 13 }}>
+            Enter your league name/code to open that league.
+          </div>
+
+          <form
+            onSubmit={handleJoinLeague}
             style={{
+              marginTop: 16,
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
-              gap: 14,
+              gap: 12,
             }}
           >
-            <NavLink to="/tags" style={buttonStyle}>
-              Tags
-            </NavLink>
+            <input
+              value={leagueIdInput}
+              onChange={(e) => setLeagueIdInput(e.target.value)}
+              placeholder="League name/code (example: pescado)"
+              style={inputStyle}
+              autoFocus
+            />
 
-            <NavLink to="/putting" style={buttonStyle}>
-              Putting
-            </NavLink>
+            {joinError && (
+              <div style={{ color: "#b00020", fontSize: 13, maxWidth: 320 }}>
+                {joinError}
+              </div>
+            )}
 
-            <NavLink to="/doubles" style={buttonStyle}>
-              Doubles
-            </NavLink>
-
-            {/* League button opens modal */}
-            <button
-              type="button"
-              style={buttonStyle}
-              onClick={openLeagueDialog}
-            >
-              League
+            <button type="submit" style={buttonStyle} disabled={joining}>
+              {joining ? "Joining..." : "Open League"}
             </button>
-          </div>
-        </div>
 
-        {/* Modal */}
-        {showLeagueDialog && (
-          <div
-            onClick={closeLeagueDialog}
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "rgba(0,0,0,0.35)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 16,
-              zIndex: 9999,
-            }}
-          >
             <div
-              onClick={(e) => e.stopPropagation()}
               style={{
-                width: "100%",
-                maxWidth: 420,
-                background: "#fff",
-                borderRadius: 16,
-                border: `2px solid ${COLORS.navy}`,
-                padding: 16,
-                boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
+                marginTop: 4,
+                opacity: 0.75,
+                fontSize: 12,
+                maxWidth: 380,
               }}
             >
-              <div style={{ fontWeight: 1000, fontSize: 18 }}>
-                Join a League
-              </div>
-              <div style={{ marginTop: 6, opacity: 0.8, fontSize: 13 }}>
-                Enter the league name/code you were given.
-              </div>
-
-              <form onSubmit={handleJoinLeague} style={{ marginTop: 14 }}>
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 10 }}
-                >
-                  <input
-                    value={leagueIdInput}
-                    onChange={(e) => setLeagueIdInput(e.target.value)}
-                    placeholder="League name/code (example: default-league)"
-                    style={{
-                      padding: 12,
-                      borderRadius: 12,
-                      border: "1px solid #ccc",
-                      fontSize: 14,
-                    }}
-                    autoFocus
-                  />
-
-                  {joinError && (
-                    <div style={{ color: "#b00020", fontSize: 13 }}>
-                      {joinError}
-                    </div>
-                  )}
-
-                  <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-                    <button
-                      type="button"
-                      onClick={closeLeagueDialog}
-                      style={{
-                        flex: 1,
-                        padding: 12,
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background: "#fff",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                      }}
-                      disabled={joining}
-                    >
-                      Cancel
-                    </button>
-
-                    <button
-                      type="submit"
-                      style={{
-                        flex: 1,
-                        padding: 12,
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background: COLORS.orange,
-                        fontWeight: 900,
-                        cursor: "pointer",
-                      }}
-                      disabled={joining}
-                    >
-                      {joining ? "Joining..." : "Join"}
-                    </button>
-                  </div>
-                </div>
-              </form>
+              Tip: league names are case-sensitive. Try <b>pescado</b> if that’s
+              your default league.
             </div>
-          </div>
-        )}
+          </form>
+        </div>
       </div>
     </div>
   );

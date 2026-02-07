@@ -2,13 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
-import {
-  doc,
-  onSnapshot,
-  setDoc,
-  updateDoc,
-  deleteField,
-} from "firebase/firestore";
+import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
 const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
@@ -61,10 +55,6 @@ function fromCents(cents) {
 }
 
 function payoutPlacesForTeamCount(teamCount) {
-  // same spirit as Putting:
-  // 2-4 teams => 1 paid place
-  // 5-7 teams => 2 paid places
-  // 8+ teams  => 3 paid places
   if (teamCount > 7) return 3;
   if (teamCount >= 5) return 2;
   if (teamCount >= 2) return 1;
@@ -158,7 +148,6 @@ function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
   const posDollars = allocateWholeDollarsByShares(positionShares, potCents);
   const payouts = {};
 
-  // tie groups by identical score
   const groups = [];
   for (const r of rowsSorted) {
     const last = groups[groups.length - 1];
@@ -198,7 +187,6 @@ function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
     if (pos > nPositions) break;
   }
 
-  // Safety clamp (should not exceed whole-dollar pot)
   const totalPaidCents = Object.values(payouts).reduce(
     (a, b) => a + (Number(b) || 0),
     0
@@ -223,8 +211,7 @@ function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
 /**
  * Tie-aware placements for leaderboard display.
  * rowsSorted must already be sorted by score ASC (lower is better).
- * Competition ranking:
- *  - 1st, then (if tie for 2nd across many) all show 2, next distinct score shows index+1.
+ * Competition ranking.
  */
 function computeTiePlacesAsc(rowsSorted) {
   const places = {};
@@ -332,8 +319,25 @@ export default function DoublesPage() {
     DEFAULT_PAYOUT_CONFIG.leagueFeePct
   );
 
-  // Admin unlock window (prevents password prompt on every click)
-  const [adminOkUntil, setAdminOkUntil] = useState(0);
+  // ✅ Admin unlock window (device-specific, persists across refresh)
+  const ADMIN_OK_KEY = useMemo(
+    () => `dg_admin_ok_until_doubles_${LEAGUE_ID}`,
+    []
+  );
+  const [adminOkUntil, setAdminOkUntil] = useState(() => {
+    const raw = localStorage.getItem(ADMIN_OK_KEY);
+    const n = Number(raw || 0);
+    return Number.isFinite(n) ? n : 0;
+  });
+
+  function setAdminOkUntilPersist(ms) {
+    setAdminOkUntil(ms);
+    try {
+      localStorage.setItem(ADMIN_OK_KEY, String(ms));
+    } catch {
+      // ignore storage failures
+    }
+  }
 
   // Ensure baseline shape
   const defaultDoubles = useMemo(
@@ -358,14 +362,25 @@ export default function DoublesPage() {
   // Admin-only helper: password on click (10 min unlock)
   async function requireAdmin(fn) {
     const now = Date.now();
-    if (now < adminOkUntil) return fn();
+
+    // refresh from storage (in case another tab updated it)
+    let okUntil = adminOkUntil;
+    try {
+      const raw = localStorage.getItem(ADMIN_OK_KEY);
+      const n = Number(raw || 0);
+      if (Number.isFinite(n)) okUntil = n;
+    } catch {}
+
+    if (now < okUntil) return fn();
 
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
     }
-    setAdminOkUntil(now + 10 * 60 * 1000);
+
+    const next = now + 10 * 60 * 1000;
+    setAdminOkUntilPersist(next);
     return fn();
   }
 
@@ -729,7 +744,6 @@ export default function DoublesPage() {
     await requireAdmin(async () => {
       await updateDoc(leagueRef, {
         doubles: defaultDoubles,
-        "doubles.updatedAt": Date.now(),
       });
 
       setExpandedCardId(null);
@@ -947,7 +961,6 @@ export default function DoublesPage() {
     if (!payoutsAreEnabled)
       return { ok: false, reason: "Payouts are disabled." };
 
-    // pot is based on PLAYERS (checkins), paid to TEAMS (leaderboard rows)
     const buyIn = clampInt(payoutConfig.buyInDollars, 0, 50);
     const feePct = clampInt(payoutConfig.leagueFeePct, 0, 50);
 
@@ -1137,7 +1150,6 @@ export default function DoublesPage() {
     );
   }
 
-  // Convenience: show payout config summary
   const payoutSummary = `${clampInt(
     payoutConfig.buyInDollars,
     0,
@@ -1167,16 +1179,30 @@ export default function DoublesPage() {
             <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
               <div style={{ color: COLORS.muted, lineHeight: 1.35 }}>
                 <div>
-                  <b>Format:</b> {formatSummary.fmtLabel}
+                  <b>Format:</b>{" "}
+                  {(doubles?.format || "random") === "seated"
+                    ? "Seated Doubles (A/B)"
+                    : "Random Doubles"}
                 </div>
                 <div>
-                  <b>{formatSummary.caliLabel}</b>
+                  <b>
+                    {(doubles?.caliMode || "random") === "manual"
+                      ? "Cali: Admin selects (only if odd #)"
+                      : "Cali: Random (only if odd #)"}
+                  </b>
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <b>Layout:</b> {doubles.layoutNote ? doubles.layoutNote : "—"}
                 </div>
                 <div style={{ marginTop: 6 }}>
-                  <b>Check-in:</b> {checkinStatus}
+                  <b>Check-in:</b>{" "}
+                  {(() => {
+                    if (!checkins.length) return "No players checked in yet.";
+                    if (!isSeated) return `${checkins.length} player(s) checked in.`;
+                    const a = checkins.filter((p) => p.pool === "A").length;
+                    const b = checkins.filter((p) => p.pool === "B").length;
+                    return `${checkins.length} checked in (A: ${a}, B: ${b}).`;
+                  })()}
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <b>Payouts:</b>{" "}
@@ -1213,7 +1239,6 @@ export default function DoublesPage() {
                 </div>
               </div>
 
-              {/* ✅ Start Round button here */}
               {!started && (
                 <div style={{ display: "grid", gap: 10 }}>
                   <button
@@ -1350,9 +1375,8 @@ export default function DoublesPage() {
                 const isOpen = expandedCardId === c.id;
 
                 const teamIds = (c.teams || []).map((t) => t.id);
-                const submittedCount = teamIds.filter(
-                  (id) => !!submissions[id]
-                ).length;
+                const submittedCount = teamIds.filter((id) => !!submissions[id])
+                  .length;
 
                 return (
                   <div
@@ -1530,7 +1554,7 @@ export default function DoublesPage() {
           )}
         </div>
 
-        {/* 4) Leaderboard (only after started; above Admin) */}
+        {/* 4) Leaderboard */}
         {started && (
           <div style={{ marginTop: 14, ...cardStyle }}>
             <div style={{ fontWeight: 1000, fontSize: 18, color: COLORS.navy }}>
@@ -1878,7 +1902,6 @@ export default function DoublesPage() {
                         )}
                       </div>
 
-                      {/* Configure button only when enabled */}
                       <button
                         style={{
                           ...button(false),
@@ -2144,16 +2167,10 @@ export default function DoublesPage() {
                       ))}
 
                       <div style={{ display: "flex", gap: 10 }}>
-                        <button
-                          style={button(true)}
-                          onClick={saveStartingHoleEdits}
-                        >
+                        <button style={button(true)} onClick={saveStartingHoleEdits}>
                           Save (Admin)
                         </button>
-                        <button
-                          style={button(false)}
-                          onClick={() => setEditHolesOpen(false)}
-                        >
+                        <button style={button(false)} onClick={() => setEditHolesOpen(false)}>
                           Cancel
                         </button>
                       </div>
@@ -2190,8 +2207,7 @@ export default function DoublesPage() {
             textAlign: "center",
           }}
         >
-          {APP_VERSION} • Pot is computed from player check-ins (buy-in per
-          player) • Payouts are posted to teams
+          {APP_VERSION} • Pot is computed from player check-ins (buy-in per player) • Payouts are posted to teams
         </div>
 
         <div style={{ height: 30 }} />

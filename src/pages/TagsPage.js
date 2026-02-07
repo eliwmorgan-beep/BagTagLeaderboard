@@ -1,4 +1,6 @@
+// src/pages/TagsPage.js
 import React, { useEffect, useMemo, useState } from "react";
+import { useParams, NavLink } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import {
@@ -10,7 +12,6 @@ import {
   runTransaction,
 } from "firebase/firestore";
 
-const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
 
 function uid() {
@@ -114,6 +115,8 @@ function getScopeTags(scope, sortedLeaderboard) {
 }
 
 export default function TagsPage() {
+  const { leagueId } = useParams();
+
   const [players, setPlayers] = useState([]); // {id, name, startTag}
   const [rounds, setRounds] = useState([]); // [{id, date, scores:[{id,score}], system?:true}]
   const [roundHistory, setRoundHistory] = useState([]); // [{id,date,entries:[...], comment?:string}]
@@ -154,7 +157,10 @@ export default function TagsPage() {
   // ✅ Admin Tools expandable controls
   const [adminExpanded, setAdminExpanded] = useState(false);
 
-  const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
+  // ✅ Admin unlock window (device/tab specific)
+  const [adminOkUntil, setAdminOkUntil] = useState(0);
+
+  const leagueRef = useMemo(() => doc(db, "leagues", leagueId), [leagueId]);
 
   // --- Palette / look ---
   const COLORS = {
@@ -177,6 +183,9 @@ export default function TagsPage() {
       await ensureAnonAuth();
 
       const first = await getDoc(leagueRef);
+
+      // If you're doing join-only leagues, this normally won't run;
+      // but keeping it is safe (only runs if doc doesn't exist).
       if (!first.exists()) {
         await setDoc(leagueRef, {
           players: [],
@@ -236,15 +245,22 @@ export default function TagsPage() {
     return weeksToMs(mode.weeks || 2);
   }
 
-  async function adminAction(action) {
+  // ✅ Admin password gate (unlocks for 10 minutes on THIS device/tab)
+  async function requireAdmin(action) {
+    const now = Date.now();
+    if (now < adminOkUntil) {
+      await action();
+      return;
+    }
+
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
     }
+
+    setAdminOkUntil(now + 10 * 60 * 1000);
     await action();
-    // Optional: collapse tools after a successful admin action
-    // setAdminExpanded(false);
   }
 
   async function addPlayer() {
@@ -490,7 +506,7 @@ export default function TagsPage() {
   }
 
   async function activateDefendMode() {
-    await adminAction(async () => {
+    await requireAdmin(async () => {
       const scope = defend.scope || "podium";
       const durationType = defend.durationType || "weeks";
       const weeks = Number(defend.weeks || 2);
@@ -519,7 +535,7 @@ export default function TagsPage() {
   }
 
   async function applyDefendSettingsWhileActive() {
-    await adminAction(async () => {
+    await requireAdmin(async () => {
       const scope = defend.scope || "podium";
       const durationType = defend.durationType || "weeks";
       const weeks = Number(defend.weeks || 2);
@@ -549,7 +565,7 @@ export default function TagsPage() {
   }
 
   async function turnOffDefendMode() {
-    await adminAction(async () => {
+    await requireAdmin(async () => {
       await updateDoc(leagueRef, {
         defendMode: {
           ...defend,
@@ -564,7 +580,7 @@ export default function TagsPage() {
   // DROP EXPIRED TAGHOLDERS (MANUAL BUTTON)
   // ---------------------------
   async function dropExpiredTagholdersToLast() {
-    await adminAction(async () => {
+    await requireAdmin(async () => {
       if (!defend?.enabled) {
         alert("Defend Mode is OFF.");
         return;
@@ -759,6 +775,20 @@ export default function TagsPage() {
           }}
         >
           <Header />
+
+          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+            League: <b>{leagueId}</b> <span style={{ opacity: 0.6 }}>•</span>{" "}
+            <NavLink
+              to={`/league/${encodeURIComponent(leagueId)}`}
+              style={{
+                fontWeight: 900,
+                color: COLORS.navy,
+                textDecoration: "none",
+              }}
+            >
+              Back to League
+            </NavLink>
+          </div>
 
           <div
             style={{
@@ -1230,8 +1260,7 @@ export default function TagsPage() {
                   <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
                     Current settings:{" "}
                     <strong>{defendSummaryText(defend)}</strong>
-                    {" • "}
-                    Expired (in scope): <strong>{expiredCount}</strong>
+                    {" • "}Expired (in scope): <strong>{expiredCount}</strong>
                   </div>
                 )}
 
@@ -1446,7 +1475,7 @@ export default function TagsPage() {
                   </select>
 
                   <button
-                    onClick={() => adminAction(dropPlayerToLast)}
+                    onClick={() => requireAdmin(dropPlayerToLast)}
                     style={{
                       ...smallButtonStyle,
                       background: COLORS.navy,
@@ -1462,7 +1491,7 @@ export default function TagsPage() {
               {/* Delete Last Round */}
               <div style={{ marginTop: 14 }}>
                 <button
-                  onClick={() => adminAction(deleteLastRound)}
+                  onClick={() => requireAdmin(deleteLastRound)}
                   style={{
                     ...smallButtonStyle,
                     background: COLORS.orange,
@@ -1476,7 +1505,7 @@ export default function TagsPage() {
 
               {/* Reset All */}
               <button
-                onClick={() => adminAction(resetAll)}
+                onClick={() => requireAdmin(resetAll)}
                 style={{
                   ...smallButtonStyle,
                   background: COLORS.red,
