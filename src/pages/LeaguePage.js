@@ -6,7 +6,7 @@ import { db, ensureAnonAuth } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
 const APP_VERSION = "league-search-v1.0.0";
-const ADMIN_PASSWORD = "Pescado!admin"; // your admin password
+const ADMIN_PASSWORD = "Pescado!"; // your admin password
 
 function normalizeLeagueId(raw) {
   return String(raw || "").trim();
@@ -27,7 +27,7 @@ export default function LeaguePage() {
   const [createMsgColor, setCreateMsgColor] = useState("rgba(0,0,0,0.65)");
   const [creating, setCreating] = useState(false);
 
-  // Responsive flag (no CSS files needed)
+  // Responsive flag
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 560px)");
@@ -83,7 +83,15 @@ export default function LeaguePage() {
     fontWeight: 1000,
     color: COLORS.navy,
     textAlign: "center",
-    fontSize: isMobile ? 18 : 18,
+    fontSize: 18,
+  };
+
+  // ✅ shared “neat centered” width for BOTH inputs + buttons
+  const fieldWrap = {
+    width: "100%",
+    maxWidth: 520,
+    marginLeft: "auto",
+    marginRight: "auto",
   };
 
   const input = {
@@ -94,6 +102,8 @@ export default function LeaguePage() {
     outline: "none",
     fontSize: 16,
     textAlign: "left",
+    background: "#fff",
+    boxSizing: "border-box",
   };
 
   const goBtn = {
@@ -104,8 +114,8 @@ export default function LeaguePage() {
     color: "white",
     fontWeight: 1000,
     cursor: "pointer",
-    minWidth: isMobile ? 160 : 88,
-    width: isMobile ? "100%" : "auto",
+    width: "100%", // ✅ matches input width
+    boxSizing: "border-box",
   };
 
   const createBtn = {
@@ -117,8 +127,8 @@ export default function LeaguePage() {
     fontWeight: 1000,
     cursor: creating ? "not-allowed" : "pointer",
     opacity: creating ? 0.7 : 1,
-    minWidth: isMobile ? 200 : 180,
-    width: isMobile ? "100%" : "auto",
+    width: "100%", // ✅ matches input width
+    boxSizing: "border-box",
   };
 
   function go() {
@@ -159,11 +169,9 @@ export default function LeaguePage() {
       if (existing.exists()) {
         setCreateMsgColor(COLORS.red);
         setCreateMsg("That league id already exists.");
-        setCreating(false);
         return;
       }
 
-      // Create the league doc. Pages work automatically because they read /leagues/:leagueId.
       await setDoc(
         leagueRef,
         {
@@ -177,7 +185,6 @@ export default function LeaguePage() {
       setCreateMsg("✅ League created.");
       setNewLeagueId("");
 
-      // take you straight to the new league hub
       navigate(`/league/${encodeURIComponent(id)}`);
     } catch (err) {
       setCreateMsgColor(COLORS.red);
@@ -199,32 +206,34 @@ export default function LeaguePage() {
           <div style={panel}>
             <div style={panelTitle}>Go to league by ID</div>
 
-            <div
-              style={{
-                marginTop: 12,
-                display: "flex",
-                flexDirection: isMobile ? "column" : "row",
-                gap: 10,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <div style={{ width: "100%" }}>
-                <input
-                  style={input}
-                  placeholder="Enter league id..."
-                  value={leagueId}
-                  onChange={(e) => setLeagueId(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") go();
-                  }}
-                />
-              </div>
+            <div style={{ marginTop: 12, ...fieldWrap }}>
+              {/* Desktop: input + button on one row. Mobile: stacks. */}
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: isMobile ? "column" : "row",
+                  gap: 10,
+                  alignItems: "stretch",
+                  justifyContent: "center",
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <input
+                    style={input}
+                    placeholder="Enter league id..."
+                    value={leagueId}
+                    onChange={(e) => setLeagueId(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") go();
+                    }}
+                  />
+                </div>
 
-              <div style={{ width: isMobile ? "100%" : "auto" }}>
-                <button style={goBtn} onClick={go}>
-                  Go
-                </button>
+                <div style={{ width: isMobile ? "100%" : 120 }}>
+                  <button style={goBtn} onClick={go}>
+                    Go
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -234,39 +243,34 @@ export default function LeaguePage() {
             <div style={panelTitle}>Create New League (Admin)</div>
 
             <div
-              style={{
-                marginTop: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
+              style={{ marginTop: 12, ...fieldWrap, display: "grid", gap: 10 }}
             >
-              <div style={{ width: "100%" }}>
-                <input
-                  style={input}
-                  placeholder="New league id (ex: pescado, winter-2026)"
-                  value={newLeagueId}
-                  onChange={(e) => setNewLeagueId(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") createLeague();
-                  }}
-                />
-              </div>
+              <input
+                style={input}
+                placeholder="New league id (ex: pescado, winter-2026)"
+                value={newLeagueId}
+                onChange={(e) => setNewLeagueId(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createLeague();
+                }}
+              />
 
-              <div style={{ width: isMobile ? "100%" : "auto" }}>
-                <button
-                  style={createBtn}
-                  onClick={createLeague}
-                  disabled={creating}
-                >
-                  {creating ? "Creating..." : "Create League"}
-                </button>
-              </div>
+              <button
+                style={createBtn}
+                onClick={createLeague}
+                disabled={creating}
+              >
+                {creating ? "Creating..." : "Create League"}
+              </button>
 
               {!!createMsg && (
-                <div style={{ fontWeight: 900, color: createMsgColor }}>
+                <div
+                  style={{
+                    fontWeight: 900,
+                    color: createMsgColor,
+                    textAlign: "center",
+                  }}
+                >
                   {createMsg}
                 </div>
               )}
@@ -274,9 +278,15 @@ export default function LeaguePage() {
           </div>
 
           {/* Footer */}
-          <div style={{ marginTop: 16, fontSize: 12, opacity: 0.7 }}>
-            {APP_VERSION} • Developed by Eli Morgan
-          </div>
+        <div
+          style={{
+            marginTop: 16,
+            fontSize: 12,
+            opacity: 0.7,
+            textAlign: "center",
+          }}
+        >
+          Developed by Eli Morgan
         </div>
       </div>
     </div>
