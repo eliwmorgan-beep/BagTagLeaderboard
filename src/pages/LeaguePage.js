@@ -1,41 +1,24 @@
 // src/pages/LeaguePage.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
-const APP_VERSION = "league-search-v1.0.0";
-const ADMIN_PASSWORD = "Pescado!"; // your admin password
-
-function normalizeLeagueId(raw) {
-  return String(raw || "").trim();
-}
-
-// allow: letters, numbers, dash, underscore
-function isValidLeagueId(id) {
-  return /^[a-zA-Z0-9_-]{2,40}$/.test(id);
-}
+const ADMIN_PASSWORD = "Pescado!";
 
 export default function LeaguePage() {
   const navigate = useNavigate();
 
+  const APP_FOOTER = "Developed by Eli Morgan";
+
   const [leagueId, setLeagueId] = useState("");
 
+  // Create league (admin)
   const [newLeagueId, setNewLeagueId] = useState("");
   const [createMsg, setCreateMsg] = useState("");
   const [createMsgColor, setCreateMsgColor] = useState("rgba(0,0,0,0.65)");
-  const [creating, setCreating] = useState(false);
-
-  // Responsive flag
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 560px)");
-    const apply = () => setIsMobile(!!mq.matches);
-    apply();
-    mq.addEventListener?.("change", apply);
-    return () => mq.removeEventListener?.("change", apply);
-  }, []);
+  const [adminOkUntil, setAdminOkUntil] = useState(0);
 
   const COLORS = useMemo(
     () => ({
@@ -56,7 +39,7 @@ export default function LeaguePage() {
     background: `linear-gradient(180deg, ${COLORS.soft} 0%, #ffffff 60%)`,
     display: "flex",
     justifyContent: "center",
-    padding: isMobile ? 14 : 24,
+    padding: 24,
   };
 
   const container = { width: "100%", maxWidth: 860 };
@@ -65,133 +48,152 @@ export default function LeaguePage() {
     background: COLORS.card,
     border: `1px solid ${COLORS.border}`,
     borderRadius: 16,
-    padding: isMobile ? 14 : 18,
+    padding: 18,
     boxShadow: "0 8px 22px rgba(0,0,0,0.06)",
     textAlign: "center",
   };
 
-  const panel = {
+  const sectionBox = {
     marginTop: 18,
-    textAlign: "center",
+    textAlign: "left",
     border: `1px solid ${COLORS.border}`,
     borderRadius: 16,
-    padding: isMobile ? 12 : 14,
+    padding: 14,
     background: COLORS.soft,
   };
 
-  const panelTitle = {
+  const innerPanel = {
+    marginTop: 10,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 16,
+    padding: 14,
+    background: "#ffffff",
+  };
+
+  const labelTitle = {
     fontWeight: 1000,
     color: COLORS.navy,
     textAlign: "center",
-    fontSize: 18,
-  };
-
-  // ✅ shared “neat centered” width for BOTH inputs + buttons
-  const fieldWrap = {
-    width: "100%",
-    maxWidth: 520,
-    marginLeft: "auto",
-    marginRight: "auto",
+    fontSize: 20,
   };
 
   const input = {
     width: "100%",
-    padding: isMobile ? "16px 14px" : "14px 14px",
+    boxSizing: "border-box",
+    padding: "14px 14px",
     borderRadius: 14,
     border: `1px solid ${COLORS.border}`,
     outline: "none",
     fontSize: 16,
-    textAlign: "left",
     background: "#fff",
+  };
+
+  const btnBase = {
+    width: "100%",
     boxSizing: "border-box",
+    padding: "14px 18px",
+    borderRadius: 14,
+    border: `2px solid ${COLORS.navy}`,
+    fontWeight: 1000,
+    cursor: "pointer",
   };
 
   const goBtn = {
-    padding: "14px 18px",
-    borderRadius: 14,
-    border: `2px solid ${COLORS.navy}`,
+    ...btnBase,
     background: COLORS.navy,
     color: "white",
-    fontWeight: 1000,
-    cursor: "pointer",
-    width: "100%", // ✅ matches input width
-    boxSizing: "border-box",
   };
 
   const createBtn = {
-    padding: "14px 18px",
-    borderRadius: 14,
-    border: `2px solid ${COLORS.navy}`,
+    ...btnBase,
     background: COLORS.orange,
     color: COLORS.navy,
-    fontWeight: 1000,
-    cursor: creating ? "not-allowed" : "pointer",
-    opacity: creating ? 0.7 : 1,
-    width: "100%", // ✅ matches input width
-    boxSizing: "border-box",
   };
 
-  function go() {
-    const id = normalizeLeagueId(leagueId);
-    if (!id) return;
-    navigate(`/league/${encodeURIComponent(id)}`);
-  }
-
-  async function createLeague() {
-    setCreateMsg("");
-    setCreateMsgColor(COLORS.muted);
-
-    const id = normalizeLeagueId(newLeagueId);
-
-    if (!id) {
-      setCreateMsgColor(COLORS.red);
-      setCreateMsg("Enter a new league id.");
-      return;
-    }
-    if (!isValidLeagueId(id)) {
-      setCreateMsgColor(COLORS.red);
-      setCreateMsg("League id must be 2–40 chars: letters, numbers, - or _");
-      return;
-    }
+  async function requireAdmin(fn) {
+    const now = Date.now();
+    if (now < adminOkUntil) return fn();
 
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
     }
+    setAdminOkUntil(now + 10 * 60 * 1000);
+    return fn();
+  }
 
-    setCreating(true);
-    try {
-      await ensureAnonAuth();
+  function go() {
+    const id = (leagueId || "").trim();
+    if (!id) return;
+    navigate(`/league/${encodeURIComponent(id)}`);
+  }
 
-      const leagueRef = doc(db, "leagues", id);
-      const existing = await getDoc(leagueRef);
-      if (existing.exists()) {
-        setCreateMsgColor(COLORS.red);
-        setCreateMsg("That league id already exists.");
-        return;
-      }
+  function isValidLeagueId(id) {
+    // simple & safe: letters/numbers/_/-
+    return /^[a-z0-9_-]{2,40}$/i.test(id);
+  }
 
-      await setDoc(
-        leagueRef,
-        {
-          createdAt: Date.now(),
-          leagueId: id,
-        },
-        { merge: true }
-      );
+  async function createLeague() {
+    setCreateMsg("");
+    setCreateMsgColor(COLORS.muted);
 
-      setCreateMsgColor(COLORS.green);
-      setCreateMsg("✅ League created.");
-      setNewLeagueId("");
+    const idRaw = (newLeagueId || "").trim();
+    const id = idRaw;
 
-      navigate(`/league/${encodeURIComponent(id)}`);
-    } catch (err) {
+    if (!id) {
       setCreateMsgColor(COLORS.red);
-      setCreateMsg(`❌ Failed: ${err?.message || String(err)}`);
-    } finally {
-      setCreating(false);
+      setCreateMsg("Please enter a new league id.");
+      return;
     }
+    if (!isValidLeagueId(id)) {
+      setCreateMsgColor(COLORS.red);
+      setCreateMsg(
+        "League id must be 2–40 characters and only use letters, numbers, hyphen (-), or underscore (_)."
+      );
+      return;
+    }
+
+    await requireAdmin(async () => {
+      try {
+        setCreateMsgColor(COLORS.muted);
+        setCreateMsg("Creating league…");
+
+        await ensureAnonAuth();
+
+        const leagueRef = doc(db, "leagues", id);
+        const snap = await getDoc(leagueRef);
+
+        if (snap.exists()) {
+          setCreateMsgColor(COLORS.red);
+          setCreateMsg("That league id already exists.");
+          return;
+        }
+
+        // Create the league doc. Pages auto-work because they load by leagueId.
+        await setDoc(
+          leagueRef,
+          {
+            leagueId: id,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            // Optional: a displayName field if you ever want it later
+            // displayName: id,
+          },
+          { merge: true }
+        );
+
+        setCreateMsgColor(COLORS.green);
+        setCreateMsg("✅ League created. Opening it now…");
+
+        setTimeout(() => {
+          navigate(`/league/${encodeURIComponent(id)}`);
+        }, 400);
+      } catch (err) {
+        setCreateMsgColor(COLORS.red);
+        setCreateMsg(`❌ Failed: ${err?.message || String(err)}`);
+      }
+    });
   }
 
   return (
@@ -199,94 +201,75 @@ export default function LeaguePage() {
       <div style={container}>
         <div style={card}>
           <Header />
-
           <h2 style={{ marginTop: 12, color: COLORS.navy }}>Search League</h2>
 
           {/* Go to league */}
-          <div style={panel}>
-            <div style={panelTitle}>Go to league by ID</div>
+          <div style={sectionBox}>
+            <div style={labelTitle}>Go to league by ID</div>
 
-            <div style={{ marginTop: 12, ...fieldWrap }}>
-              {/* Desktop: input + button on one row. Mobile: stacks. */}
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: isMobile ? "column" : "row",
-                  gap: 10,
-                  alignItems: "stretch",
-                  justifyContent: "center",
-                }}
-              >
-                <div style={{ flex: 1 }}>
-                  <input
-                    style={input}
-                    placeholder="Enter league id..."
-                    value={leagueId}
-                    onChange={(e) => setLeagueId(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") go();
-                    }}
-                  />
-                </div>
+            <div style={innerPanel}>
+              <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+                <input
+                  style={input}
+                  placeholder="Enter league id..."
+                  value={leagueId}
+                  onChange={(e) => setLeagueId(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") go();
+                  }}
+                />
 
-                <div style={{ width: isMobile ? "100%" : 120 }}>
-                  <button style={goBtn} onClick={go}>
-                    Go
-                  </button>
-                </div>
+                <button style={goBtn} onClick={go}>
+                  Go
+                </button>
               </div>
             </div>
           </div>
 
-          {/* Create new league */}
-          <div style={{ ...panel, marginTop: 14 }}>
-            <div style={panelTitle}>Create New League (Admin)</div>
+          {/* Create league */}
+          <div style={{ ...sectionBox, marginTop: 14 }}>
+            <div style={labelTitle}>Create New League (Admin)</div>
 
-            <div
-              style={{ marginTop: 12, ...fieldWrap, display: "grid", gap: 10 }}
-            >
-              <input
-                style={input}
-                placeholder="New league id (ex: pescado, winter-2026)"
-                value={newLeagueId}
-                onChange={(e) => setNewLeagueId(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") createLeague();
-                }}
-              />
-
-              <button
-                style={createBtn}
-                onClick={createLeague}
-                disabled={creating}
-              >
-                {creating ? "Creating..." : "Create League"}
-              </button>
-
-              {!!createMsg && (
-                <div
-                  style={{
-                    fontWeight: 900,
-                    color: createMsgColor,
-                    textAlign: "center",
+            <div style={innerPanel}>
+              <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+                <input
+                  style={input}
+                  placeholder="New league id (ex: pescado, winter-2026)"
+                  value={newLeagueId}
+                  onChange={(e) => setNewLeagueId(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") createLeague();
                   }}
-                >
-                  {createMsg}
-                </div>
-              )}
+                />
+
+                <button style={createBtn} onClick={createLeague}>
+                  Create League
+                </button>
+
+                {!!createMsg && (
+                  <div style={{ fontWeight: 900, color: createMsgColor }}>
+                    {createMsg}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
+          <div style={{ marginTop: 16, fontSize: 12, opacity: 0.6 }}>
+            (League IDs are not listed here by design.)
+          </div>
+
           {/* Footer */}
-        <div
-          style={{
-            marginTop: 16,
-            fontSize: 12,
-            opacity: 0.7,
-            textAlign: "center",
-          }}
-        >
-          Developed by Eli Morgan
+          <div
+            style={{
+              marginTop: 16,
+              fontSize: 12,
+              opacity: 0.7,
+              textAlign: "center",
+            }}
+          >
+            {APP_FOOTER}
+          </div>
         </div>
       </div>
     </div>
