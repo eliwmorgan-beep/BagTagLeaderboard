@@ -784,7 +784,9 @@ export default function PuttingPage() {
     // Sequential: no check-in until format locked, and can be locked later
     if (playMode === "sequential") {
       if (!formatLocked) {
-        alert("Check-in is closed until the admin clicks Lock Format and Open Check-In.");
+        alert(
+          "Check-in is closed until the admin clicks Lock Format and Open Check-In."
+        );
         return;
       }
       if (checkinLocked) {
@@ -832,7 +834,10 @@ export default function PuttingPage() {
         (putting.seqCards?.length || 0) > 0 ||
         Object.keys(putting.seqRoundScores || {}).length > 0;
 
-      if ((nextMode === "simultaneous" && hasSeqData) || (nextMode === "sequential" && hasSimData)) {
+      if (
+        (nextMode === "simultaneous" && hasSeqData) ||
+        (nextMode === "sequential" && hasSimData)
+      ) {
         const ok = window.confirm(
           "Switching formats while data exists can be confusing.\n\nIf you are switching because you chose the wrong mode, consider resetting the Putting League first.\n\nSwitch anyway?"
         );
@@ -853,7 +858,9 @@ export default function PuttingPage() {
     if (finalized) return;
     await requireAdmin(async () => {
       if (players.length > 0) {
-        alert("Pool mode can't be changed after players have checked in. Reset Putting League to change it.");
+        alert(
+          "Pool mode can't be changed after players have checked in. Reset Putting League to change it."
+        );
         return;
       }
       await updatePutting({
@@ -1404,4 +1411,2510 @@ export default function PuttingPage() {
       if (poolMode === "combined") {
         pools.A.push(row);
       } else {
-        if (p.pool === "B") pools.B
+        if (p.pool === "B") pools.B.push(row);
+        else if (p.pool === "C") pools.C.push(row);
+        else pools.A.push(row);
+      }
+    });
+
+    Object.keys(pools).forEach((k) =>
+      pools[k].sort((a, b) => b.total - a.total)
+    );
+    return pools;
+  }, [
+    normalizedPlayers,
+    playMode,
+    poolMode,
+    scores,
+    stations,
+    totalRounds,
+    adjustments,
+    payoutsPosted,
+    seqCards,
+    seqRoundScores,
+    seqSubmitted,
+  ]);
+
+  /* ===========================
+     PAYOUTS (kept as-is, pool mode influences which pools exist)
+  =========================== */
+  function computeAllPayoutsDollars() {
+    if (!payoutConfig) return { ok: false, reason: "No payout configuration." };
+    if (!payoutConfig.enabled)
+      return { ok: false, reason: "Payouts are disabled." };
+
+    const buyIn = clampInt(payoutConfig.buyInDollars, 0, 50);
+    const feePct = clampInt(payoutConfig.leagueFeePct, 0, 50);
+    const mode = payoutConfig.mode;
+
+    if (!normalizedPlayers.length)
+      return { ok: false, reason: "No players checked in." };
+
+    const totalPotDollars = buyIn * normalizedPlayers.length;
+    const feeDollars = Math.round((totalPotDollars * feePct) / 100);
+    const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
+
+    if (potAfterFeeDollars <= 0)
+      return { ok: false, reason: "Pot after fee is $0." };
+
+    const pools = {
+      A: (leaderboardData.A || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+      B: (leaderboardData.B || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+      C: (leaderboardData.C || []).map((r) => ({
+        id: r.id,
+        total: r.total,
+        name: r.name,
+      })),
+    };
+
+    const countA = pools.A.length;
+    const countB = pools.B.length;
+    const countC = pools.C.length;
+
+    // In combined pool, B and C are empty; payout still works on A.
+    if (mode === "pool") {
+      const payouts = {};
+
+      const poolPotDollars = (poolCount) => {
+        const poolTotal = buyIn * poolCount;
+        const poolFee = Math.round((poolTotal * feePct) / 100);
+        return Math.max(0, poolTotal - poolFee);
+      };
+
+      const doPool = (key) => {
+        const rows = pools[key];
+        const pot = poolPotDollars(rows.length);
+
+        const places = payoutPlacesForPoolSize(rows.length);
+        const shares = sharesByPoolMode(places);
+
+        const positionAmounts = allocatePositionAmountsDollars(pot, shares);
+
+        const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
+          rows,
+          positionAmounts
+        );
+
+        Object.entries(poolPayouts).forEach(([pid, dollars]) => {
+          payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
+        });
+      };
+
+      if (countA) doPool("A");
+      if (countB) doPool("B");
+      if (countC) doPool("C");
+
+      return {
+        ok: true,
+        payouts,
+        meta: {
+          buyIn,
+          feePct,
+          mode,
+          totalPotDollars,
+          feeDollars,
+          potAfterFeeDollars,
+        },
+      };
+    }
+
+    const placesA = payoutPlacesForPoolSize(countA);
+    const placesB = payoutPlacesForPoolSize(countB);
+    const placesC = payoutPlacesForPoolSize(countC);
+
+    const slots = [];
+    for (let i = 1; i <= Math.min(3, placesA); i++)
+      slots.push({ pool: "A", pos: i });
+    for (let i = 1; i <= Math.min(2, placesB); i++)
+      slots.push({ pool: "B", pos: i });
+    for (let i = 1; i <= Math.min(1, placesC); i++)
+      slots.push({ pool: "C", pos: i });
+
+    if (!slots.length)
+      return { ok: false, reason: "No payout slots available." };
+
+    const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
+    const slotShares = scaleWeightsToFractions(base);
+
+    const slotAmounts = allocatePositionAmountsDollars(
+      potAfterFeeDollars,
+      slotShares
+    );
+
+    const perPoolPositionAmounts = { A: [], B: [], C: [] };
+    slots.forEach((slot, idx) => {
+      const amt = slotAmounts[idx] || 0;
+      const posIndex = slot.pos - 1;
+      perPoolPositionAmounts[slot.pool][posIndex] =
+        (perPoolPositionAmounts[slot.pool][posIndex] || 0) + amt;
+    });
+
+    const payouts = {};
+    ["A", "B", "C"].forEach((k) => {
+      const amounts = perPoolPositionAmounts[k].filter(
+        (x) => typeof x === "number"
+      );
+      if (!amounts.length) return;
+
+      const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
+        pools[k],
+        amounts
+      );
+
+      Object.entries(poolPayouts).forEach(([pid, dollars]) => {
+        payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
+      });
+    });
+
+    return {
+      ok: true,
+      payouts,
+      meta: {
+        buyIn,
+        feePct,
+        mode,
+        totalPotDollars,
+        feeDollars,
+        potAfterFeeDollars,
+        collectiveWeightsUsed: base,
+      },
+    };
+  }
+
+  async function postPayoutsToLeaderboard() {
+    if (!finalized) return;
+
+    await requireAdmin(async () => {
+      if (!payoutConfig.enabled) return alert("Payouts are disabled.");
+
+      const result = computeAllPayoutsDollars();
+      if (!result.ok)
+        return alert(result.reason || "Unable to compute payouts.");
+
+      const ok = window.confirm(
+        "Post payouts to the leaderboard?\n\nThis will write FULL DOLLAR amounts next to the winning players."
+      );
+      if (!ok) return;
+
+      await updatePutting({ payoutsPosted: result.payouts });
+      alert("Payouts posted ✅");
+    });
+  }
+
+  async function togglePayoutsEnabled() {
+    await requireAdmin(async () => {
+      const next = !payoutConfig.enabled;
+
+      if (!next) {
+        await updatePutting({
+          payoutConfig: {
+            ...payoutConfig,
+            enabled: false,
+            updatedAt: Date.now(),
+          },
+          payoutsPosted: {},
+        });
+        setPayoutsOpen(false);
+        alert("Payouts disabled (posted payouts cleared).");
+        return;
+      }
+
+      await updatePutting({
+        payoutConfig: { ...payoutConfig, enabled: true, updatedAt: Date.now() },
+        payoutsPosted: {},
+      });
+
+      alert("Payouts enabled ✅");
+    });
+  }
+
+  /* ===========================
+     UI GATING
+  =========================== */
+  const canBeginNextRound =
+    playMode === "simultaneous" &&
+    roundStarted &&
+    !finalized &&
+    currentRound < totalRounds &&
+    allCardsSubmittedForRound(currentRound);
+
+  const canFinalize =
+    playMode === "simultaneous" &&
+    roundStarted &&
+    !finalized &&
+    currentRound === totalRounds &&
+    allCardsSubmittedForRound(currentRound);
+
+  const submitStats =
+    playMode === "simultaneous" && roundStarted
+      ? submittedCountForRound(currentRound)
+      : { submitted: 0, total: 0 };
+
+  const missingCardsThisRound =
+    playMode === "simultaneous" && roundStarted
+      ? missingCardsForRound(currentRound)
+      : [];
+
+  const showCardModeButtons =
+    playMode === "simultaneous" &&
+    !roundStarted &&
+    !finalized &&
+    normalizedPlayers.length >= 2;
+
+  const hasPostedPayouts =
+    payoutsEnabled && Object.keys(payoutsPosted || {}).length > 0;
+
+  /* ===========================
+     GUARDS
+  =========================== */
+  if (!leagueId) {
+    return (
+      <div>
+        <Header />
+        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+          <h2>Putting League</h2>
+          <p style={{ opacity: 0.8 }}>
+            No league selected. Go back and enter a league code.
+          </p>
+          <NavLink to="/" style={{ fontWeight: 900 }}>
+            ← Back to League Search
+          </NavLink>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div>
+        <Header />
+        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+          <p>Loading league…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div>
+        <Header />
+        <div style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+          <p style={{ color: "#b00020", fontWeight: 900 }}>{loadError}</p>
+          <NavLink to="/" style={{ fontWeight: 900 }}>
+            ← Back to League Search
+          </NavLink>
+        </div>
+      </div>
+    );
+  }
+
+  /* ===========================
+     RENDER
+  =========================== */
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: `linear-gradient(180deg, ${COLORS.blueLight} 0%, #ffffff 60%)`,
+        display: "flex",
+        justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div style={{ width: "100%", maxWidth: 760 }}>
+        <div
+          style={{
+            textAlign: "center",
+            background: COLORS.panel,
+            borderRadius: 18,
+            padding: 26,
+            border: `2px solid ${COLORS.navy}`,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
+          }}
+        >
+          <Header />
+
+          <div
+            style={{
+              marginTop: 10,
+              fontSize: 12,
+              opacity: 0.7,
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <span>
+              League: <strong>{leagueId}</strong>
+            </span>
+
+            <span style={{ opacity: 0.6 }}>•</span>
+
+            <NavLink
+              to={`/league/${encodeURIComponent(leagueId)}`}
+              style={{
+                fontWeight: 900,
+                color: COLORS.navy,
+                textDecoration: "none",
+                opacity: 1,
+              }}
+            >
+              Back to League
+            </NavLink>
+          </div>
+
+          <div
+            style={{
+              color: COLORS.green,
+              marginTop: 14,
+              marginBottom: 12,
+              fontWeight: 900,
+            }}
+          >
+            Putting League —{" "}
+            <span style={{ color: COLORS.navy }}>
+              {playMode === "sequential"
+                ? "Sequential Mode"
+                : "Simultaneous Mode"}
+            </span>
+            {finalized ? (
+              <div style={{ marginTop: 6, color: COLORS.red, fontWeight: 900 }}>
+                FINALIZED (locked)
+              </div>
+            ) : null}
+          </div>
+
+          {/* Sequential top indicator */}
+          {playMode === "sequential" && (
+            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 14 }}>
+              Cards still playing:{" "}
+              <strong>
+                {cardsStillPlayingCount} / {seqCards.length}
+              </strong>
+            </div>
+          )}
+
+          {/* Admin status (simultaneous only) */}
+          {playMode === "simultaneous" && roundStarted && (
+            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 14 }}>
+              <div>
+                Admin Status: Cards submitted this round —{" "}
+                <strong>
+                  {submitStats.submitted} / {submitStats.total}
+                </strong>
+              </div>
+
+              {missingCardsThisRound.length > 0 ? (
+                <div style={{ marginTop: 6 }}>
+                  Waiting on:{" "}
+                  <strong style={{ color: COLORS.red }}>
+                    {missingCardsThisRound.map((c) => c.name).join(", ")}
+                  </strong>
+                </div>
+              ) : (
+                <div
+                  style={{ marginTop: 6, color: COLORS.green, fontWeight: 900 }}
+                >
+                  All cards submitted ✅
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ADMIN TOOLS */}
+          <div
+            style={{
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 14,
+              background: COLORS.soft,
+              padding: 12,
+              textAlign: "left",
+              marginBottom: 12,
+            }}
+          >
+            <div
+              onClick={() => setSetupOpen((v) => !v)}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                cursor: "pointer",
+                gap: 10,
+              }}
+            >
+              <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                Admin Tools
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                {setupOpen ? "Tap to collapse" : "Tap to expand"}
+              </div>
+            </div>
+
+            {setupOpen && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ display: "grid", gap: 10 }}>
+                  {/* ✅ Format selector (kept in the style you like) */}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 900,
+                        color: COLORS.navy,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Format Mode
+                    </div>
+                    <select
+                      value={playMode}
+                      onChange={(e) => setPlayMode(e.target.value)}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        background: "#fff",
+                      }}
+                      disabled={finalized}
+                      title="Requires admin password"
+                    >
+                      <option value="simultaneous">
+                        Simultaneous Stations
+                      </option>
+                      <option value="sequential">Sequential Stations</option>
+                    </select>
+                  </div>
+
+                  {/* ✅ Pool selector (kept in the style you like) */}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 900,
+                        color: COLORS.navy,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Pool Mode
+                    </div>
+                    <select
+                      value={poolMode}
+                      onChange={(e) => setPoolMode(e.target.value)}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        background: "#fff",
+                      }}
+                      disabled={finalized}
+                      title="Requires admin password"
+                    >
+                      <option value="split">Split Pool (A/B/C)</option>
+                      <option value="combined">
+                        Combined Pool (One leaderboard)
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* ✅ Dynamic explanations */}
+                  <div style={{ fontSize: 12, opacity: 0.8, lineHeight: 1.35 }}>
+                    <div
+                      style={{
+                        fontWeight: 900,
+                        color: COLORS.navy,
+                        marginBottom: 4,
+                      }}
+                    >
+                      What these mean:
+                    </div>
+                    <div style={{ marginBottom: 8 }}>{modeDesc}</div>
+                    <div>{poolDesc}</div>
+                  </div>
+
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                          marginBottom: 6,
+                        }}
+                      >
+                        Stations (1–18)
+                      </div>
+                      <select
+                        value={stations}
+                        disabled={
+                          finalized ||
+                          (playMode === "simultaneous"
+                            ? roundStarted
+                            : formatLocked)
+                        }
+                        onChange={(e) =>
+                          updatePutting({
+                            settings: {
+                              ...settings,
+                              stations: Number(e.target.value),
+                            },
+                          })
+                        }
+                        style={{
+                          ...inputStyle,
+                          width: "100%",
+                          background: "#fff",
+                        }}
+                      >
+                        {Array.from({ length: 18 }, (_, i) => i + 1).map(
+                          (n) => (
+                            <option key={n} value={n}>
+                              {n}
+                            </option>
+                          )
+                        )}
+                      </select>
+                    </div>
+
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                          marginBottom: 6,
+                        }}
+                      >
+                        Rounds
+                      </div>
+                      <select
+                        value={totalRounds}
+                        disabled={
+                          finalized ||
+                          (playMode === "simultaneous"
+                            ? roundStarted
+                            : formatLocked)
+                        }
+                        onChange={(e) =>
+                          updatePutting({
+                            settings: {
+                              ...settings,
+                              rounds: Number(e.target.value),
+                            },
+                          })
+                        }
+                        style={{
+                          ...inputStyle,
+                          width: "100%",
+                          background: "#fff",
+                        }}
+                      >
+                        {Array.from({ length: 5 }, (_, i) => i + 1).map((n) => (
+                          <option key={n} value={n}>
+                            {n}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Simultaneous control */}
+                    {playMode === "simultaneous" && !roundStarted && (
+                      <button
+                        onClick={beginRoundOneSimultaneous}
+                        style={{
+                          ...buttonStyle,
+                          width: "100%",
+                          background: COLORS.green,
+                          color: "white",
+                          border: `1px solid ${COLORS.green}`,
+                        }}
+                        disabled={finalized}
+                        title="Requires admin password."
+                      >
+                        Begin Round 1 (Lock Format)
+                      </button>
+                    )}
+
+                    {/* Sequential control */}
+                    {playMode === "sequential" && !formatLocked && (
+                      <button
+                        onClick={lockFormatAndOpenCheckin}
+                        style={{
+                          ...buttonStyle,
+                          width: "100%",
+                          background: COLORS.green,
+                          color: "white",
+                          border: `1px solid ${COLORS.green}`,
+                        }}
+                        disabled={finalized}
+                        title="Requires admin password."
+                      >
+                        Lock Format and Open Check-In
+                      </button>
+                    )}
+
+                    {playMode === "sequential" &&
+                      formatLocked &&
+                      !checkinLocked && (
+                        <button
+                          onClick={lockCheckinSequential}
+                          style={{
+                            ...buttonStyle,
+                            width: "100%",
+                            background: COLORS.navy,
+                            color: "white",
+                            border: `1px solid ${COLORS.navy}`,
+                          }}
+                          disabled={finalized}
+                          title="Requires admin password."
+                        >
+                          Lock Check-In
+                        </button>
+                      )}
+
+                    {playMode === "sequential" && formatLocked && (
+                      <button
+                        onClick={finalizeLeaderboardSequential}
+                        style={{
+                          ...buttonStyle,
+                          width: "100%",
+                          background: COLORS.red,
+                          color: "white",
+                          border: `1px solid ${COLORS.red}`,
+                        }}
+                        disabled={finalized}
+                        title="Requires admin password."
+                      >
+                        Finalize Leaderboard (Lock)
+                      </button>
+                    )}
+
+                    {/* Simultaneous next round / finalize */}
+                    {playMode === "simultaneous" && canBeginNextRound && (
+                      <button
+                        onClick={beginNextRoundSimultaneous}
+                        style={{
+                          ...buttonStyle,
+                          width: "100%",
+                          background: COLORS.navy,
+                          color: "white",
+                          border: `1px solid ${COLORS.navy}`,
+                        }}
+                        title="Requires admin password."
+                      >
+                        Begin Next Round (Auto Cards)
+                      </button>
+                    )}
+
+                    {playMode === "simultaneous" && canFinalize && (
+                      <button
+                        onClick={finalizeScoresSimultaneous}
+                        style={{
+                          ...buttonStyle,
+                          width: "100%",
+                          background: COLORS.red,
+                          color: "white",
+                          border: `1px solid ${COLORS.red}`,
+                        }}
+                        title="No password required."
+                      >
+                        Finalize Scores (Lock)
+                      </button>
+                    )}
+
+                    {/* Adjust tool */}
+                    <button
+                      onClick={openAdjustmentsEditor}
+                      style={{
+                        ...smallButtonStyle,
+                        width: "100%",
+                        background: "#fff",
+                        border: `1px solid ${COLORS.navy}`,
+                        color: COLORS.navy,
+                      }}
+                      disabled={finalized || normalizedPlayers.length === 0}
+                      title="Requires admin password."
+                    >
+                      {adjustOpen
+                        ? "Close Leaderboard Edit"
+                        : "Edit Leaderboard Scores"}
+                    </button>
+
+                    {/* payouts toggle */}
+                    <button
+                      onClick={togglePayoutsEnabled}
+                      style={{
+                        ...smallButtonStyle,
+                        width: "100%",
+                        background: payoutsEnabled ? COLORS.green : "#fff",
+                        color: payoutsEnabled ? "white" : COLORS.navy,
+                        border: `1px solid ${
+                          payoutsEnabled ? COLORS.green : COLORS.navy
+                        }`,
+                        fontWeight: 900,
+                      }}
+                      disabled={normalizedPlayers.length === 0}
+                      title="Requires admin password."
+                    >
+                      Enable Payouts: {payoutsEnabled ? "On" : "Off"}
+                    </button>
+
+                    {payoutsEnabled && (
+                      <>
+                        <button
+                          onClick={() =>
+                            requireAdmin(async () => {
+                              setPayoutsOpen((v) => !v);
+                            })
+                          }
+                          style={{
+                            ...smallButtonStyle,
+                            width: "100%",
+                            background: "#fff",
+                            border: `1px solid ${COLORS.navy}`,
+                            color: COLORS.navy,
+                          }}
+                          disabled={normalizedPlayers.length === 0}
+                          title="Requires admin password."
+                        >
+                          {payoutsOpen
+                            ? "Close Payout Configuration"
+                            : "Configure Payouts"}
+                        </button>
+
+                        {payoutsOpen && (
+                          <div
+                            style={{
+                              border: `1px solid ${COLORS.border}`,
+                              borderRadius: 12,
+                              background: "#fff",
+                              padding: 12,
+                              display: "grid",
+                              gap: 10,
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                color: COLORS.navy,
+                              }}
+                            >
+                              Payout Configuration
+                            </div>
+
+                            <label
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                textAlign: "left",
+                              }}
+                            >
+                              Buy-In ($)
+                              <select
+                                value={clampInt(
+                                  payoutConfig?.buyInDollars ?? 0,
+                                  0,
+                                  50
+                                )}
+                                onChange={(e) =>
+                                  updatePuttingDot(
+                                    "payoutConfig.buyInDollars",
+                                    clampInt(e.target.value, 0, 50)
+                                  )
+                                }
+                                style={{
+                                  ...inputStyle,
+                                  width: "100%",
+                                  marginTop: 6,
+                                  background: "#fff",
+                                }}
+                              >
+                                {Array.from({ length: 51 }, (_, i) => i).map(
+                                  (n) => (
+                                    <option key={n} value={n}>
+                                      {n}
+                                    </option>
+                                  )
+                                )}
+                              </select>
+                            </label>
+
+                            <label
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                textAlign: "left",
+                              }}
+                            >
+                              League Fee (%)
+                              <select
+                                value={clampInt(
+                                  payoutConfig?.leagueFeePct ?? 0,
+                                  0,
+                                  50
+                                )}
+                                onChange={(e) =>
+                                  updatePuttingDot(
+                                    "payoutConfig.leagueFeePct",
+                                    clampInt(e.target.value, 0, 50)
+                                  )
+                                }
+                                style={{
+                                  ...inputStyle,
+                                  width: "100%",
+                                  marginTop: 6,
+                                  background: "#fff",
+                                }}
+                              >
+                                {Array.from({ length: 51 }, (_, i) => i).map(
+                                  (n) => (
+                                    <option key={n} value={n}>
+                                      {n}
+                                    </option>
+                                  )
+                                )}
+                              </select>
+                            </label>
+
+                            <label
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                textAlign: "left",
+                              }}
+                            >
+                              Payout Mode
+                              <select
+                                value={payoutConfig?.mode ?? ""}
+                                onChange={(e) =>
+                                  updatePuttingDot(
+                                    "payoutConfig.mode",
+                                    e.target.value
+                                  )
+                                }
+                                style={{
+                                  ...inputStyle,
+                                  width: "100%",
+                                  background: "#fff",
+                                  marginTop: 6,
+                                }}
+                              >
+                                <option value="">Select mode…</option>
+                                <option value="pool">By Pool</option>
+                                <option value="collective">Collective</option>
+                              </select>
+                            </label>
+
+                            <button
+                              onClick={() =>
+                                requireAdmin(async () => {
+                                  const buyInOk = clampInt(
+                                    payoutConfig?.buyInDollars,
+                                    0,
+                                    50
+                                  );
+                                  const feeOk = clampInt(
+                                    payoutConfig?.leagueFeePct,
+                                    0,
+                                    50
+                                  );
+                                  const modeOk =
+                                    payoutConfig?.mode === "pool" ||
+                                    payoutConfig?.mode === "collective"
+                                      ? payoutConfig.mode
+                                      : "";
+
+                                  if (!modeOk) {
+                                    alert(
+                                      'Select a payout mode ("By Pool" or "Collective").'
+                                    );
+                                    return;
+                                  }
+
+                                  await updatePutting({
+                                    payoutConfig: {
+                                      enabled: true,
+                                      buyInDollars: buyInOk,
+                                      leagueFeePct: feeOk,
+                                      mode: modeOk,
+                                      updatedAt: Date.now(),
+                                    },
+                                    payoutsPosted: {},
+                                  });
+
+                                  setPayoutsOpen(false);
+                                  alert("Payouts saved ✅");
+                                })
+                              }
+                              style={{
+                                ...buttonStyle,
+                                background: COLORS.green,
+                                color: "white",
+                                border: `1px solid ${COLORS.green}`,
+                                width: "100%",
+                              }}
+                            >
+                              Save Payout Configuration
+                            </button>
+                          </div>
+                        )}
+
+                        <button
+                          onClick={postPayoutsToLeaderboard}
+                          style={{
+                            ...smallButtonStyle,
+                            width: "100%",
+                            background: "#fff",
+                            border: `2px solid ${COLORS.red}`,
+                            color: COLORS.red,
+                            fontWeight: 900,
+                          }}
+                          disabled={!finalized || !payoutsEnabled}
+                          title={
+                            !finalized
+                              ? "Only available after Finalize."
+                              : "Requires admin password."
+                          }
+                        >
+                          Post Payouts to Leaderboard
+                        </button>
+                      </>
+                    )}
+
+                    {adjustOpen && !finalized && (
+                      <div
+                        style={{
+                          border: `1px solid ${COLORS.border}`,
+                          borderRadius: 12,
+                          background: "#fff",
+                          padding: 10,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 12,
+                            opacity: 0.8,
+                            marginBottom: 10,
+                          }}
+                        >
+                          Set a player’s{" "}
+                          <strong>final leaderboard total</strong>. This creates
+                          an adjustment. Disabled after Finalize.
+                        </div>
+
+                        <div style={{ display: "grid", gap: 8 }}>
+                          {normalizedPlayers.map((p) => {
+                            const base =
+                              playMode === "simultaneous"
+                                ? cumulativeBaseTotalForPlayer(p.id)
+                                : seqCardRoundTotalsForPlayer(p.id).total;
+
+                            const adj = Number(adjustments?.[p.id] ?? 0) || 0;
+                            const total = base + adj;
+
+                            return (
+                              <div
+                                key={p.id}
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "1fr auto",
+                                  gap: 10,
+                                  alignItems: "center",
+                                  padding: "10px 12px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${COLORS.border}`,
+                                  background: COLORS.soft,
+                                }}
+                              >
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontWeight: 900 }}>
+                                    {p.name}{" "}
+                                    {poolMode === "split" ? (
+                                      <span
+                                        style={{ fontSize: 12, opacity: 0.7 }}
+                                      >
+                                        (
+                                        {p.pool === "B"
+                                          ? "B"
+                                          : p.pool === "C"
+                                          ? "C"
+                                          : "A"}{" "}
+                                        Pool)
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      opacity: 0.75,
+                                      marginTop: 2,
+                                    }}
+                                  >
+                                    Base: <strong>{base}</strong> • Adj:{" "}
+                                    <strong
+                                      style={{
+                                        color: adj ? COLORS.red : COLORS.navy,
+                                      }}
+                                    >
+                                      {adj}
+                                    </strong>{" "}
+                                    • Final: <strong>{total}</strong>
+                                  </div>
+                                </div>
+
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: 8,
+                                    alignItems: "center",
+                                  }}
+                                >
+                                  <input
+                                    type="number"
+                                    value={String(total)}
+                                    onChange={(e) =>
+                                      setFinalLeaderboardTotal(
+                                        p.id,
+                                        e.target.value
+                                      )
+                                    }
+                                    style={{
+                                      ...inputStyle,
+                                      width: 96,
+                                      textAlign: "center",
+                                      background: "#fff",
+                                      fontWeight: 900,
+                                    }}
+                                    title="Requires admin password"
+                                  />
+                                  <button
+                                    onClick={() => clearAdjustment(p.id)}
+                                    style={{
+                                      ...smallButtonStyle,
+                                      background: "#fff",
+                                      border: `1px solid ${COLORS.border}`,
+                                      fontWeight: 900,
+                                    }}
+                                    title="Requires admin password"
+                                  >
+                                    Clear
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={resetPuttingLeague}
+                      style={{
+                        ...smallButtonStyle,
+                        width: "100%",
+                        background: "#fff",
+                        border: `1px solid ${COLORS.border}`,
+                      }}
+                      title="Requires admin password."
+                    >
+                      Reset Putting League
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* CHECK-IN (always present in sequential; present until started in simultaneous) */}
+          {(playMode === "sequential" || !roundStarted) && (
+            <div
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 14,
+                background: COLORS.soft,
+                padding: 12,
+                textAlign: "left",
+                marginBottom: 12,
+              }}
+            >
+              <div
+                onClick={() => setCheckinOpen((v) => !v)}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  cursor: "pointer",
+                  gap: 10,
+                }}
+              >
+                <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                  Player Check-In ({normalizedPlayers.length})
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>
+                  {checkinOpen ? "Tap to collapse" : "Tap to expand"}
+                </div>
+              </div>
+
+              {checkinOpen && (
+                <div style={{ marginTop: 10 }}>
+                  {playMode === "sequential" && !formatLocked ? (
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Check-in is closed until the admin clicks{" "}
+                      <strong>Lock Format and Open Check-In</strong>.
+                    </div>
+                  ) : null}
+
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      marginTop: 10,
+                      opacity:
+                        playMode === "sequential" &&
+                        (!formatLocked || checkinLocked)
+                          ? 0.6
+                          : 1,
+                    }}
+                  >
+                    <input
+                      placeholder="Player name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      style={{ ...inputStyle, width: 240 }}
+                      disabled={
+                        finalized ||
+                        (playMode === "sequential" &&
+                          (!formatLocked || checkinLocked))
+                      }
+                    />
+
+                    {poolMode === "split" ? (
+                      <select
+                        value={pool}
+                        onChange={(e) => setPool(e.target.value)}
+                        style={{
+                          ...inputStyle,
+                          width: 140,
+                          background: "#fff",
+                        }}
+                        disabled={
+                          finalized ||
+                          (playMode === "sequential" &&
+                            (!formatLocked || checkinLocked))
+                        }
+                      >
+                        <option value="A">A Pool</option>
+                        <option value="B">B Pool</option>
+                        <option value="C">C Pool</option>
+                      </select>
+                    ) : null}
+
+                    <button
+                      onClick={addPlayer}
+                      style={{
+                        ...smallButtonStyle,
+                        background: COLORS.green,
+                        color: "white",
+                        border: `1px solid ${COLORS.green}`,
+                      }}
+                      disabled={
+                        finalized ||
+                        (playMode === "simultaneous" && roundStarted) ||
+                        (playMode === "sequential" &&
+                          (!formatLocked || checkinLocked))
+                      }
+                    >
+                      Add
+                    </button>
+                  </div>
+
+                  {normalizedPlayers.length ? (
+                    <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                      {normalizedPlayers.map((p) => (
+                        <div
+                          key={p.id}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            border: `1px solid ${COLORS.border}`,
+                            background: "#fff",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 10,
+                          }}
+                        >
+                          <div style={{ fontWeight: 900, color: COLORS.text }}>
+                            {p.name}
+                          </div>
+                          {poolMode === "split" ? (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                fontWeight: 900,
+                                color: COLORS.navy,
+                              }}
+                            >
+                              {p.pool === "B"
+                                ? "B Pool"
+                                : p.pool === "C"
+                                ? "C Pool"
+                                : "A Pool"}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 12, opacity: 0.7 }}>
+                              Combined Pool
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                      Add players as they arrive.
+                    </div>
+                  )}
+
+                  {/* Simultaneous only: show card-mode buttons pre-start */}
+                  {playMode === "simultaneous" && showCardModeButtons && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: 12,
+                        background: "#fff",
+                        padding: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 12,
+                          opacity: 0.85,
+                          marginBottom: 10,
+                        }}
+                      >
+                        Next: Create Round 1 cards
+                      </div>
+
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <button
+                          onClick={setCardModeManual}
+                          style={{
+                            ...buttonStyle,
+                            width: "100%",
+                            background: "#fff",
+                            border: `1px solid ${COLORS.navy}`,
+                            color: COLORS.navy,
+                          }}
+                        >
+                          Manually Create Cards
+                        </button>
+
+                        <button
+                          onClick={randomizeRound1Cards}
+                          style={{
+                            ...buttonStyle,
+                            width: "100%",
+                            background: COLORS.navy,
+                            color: "white",
+                            border: `1px solid ${COLORS.navy}`,
+                          }}
+                        >
+                          Randomize Cards
+                        </button>
+
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          Cards are created using sizes 2–4 only (no 1-player
+                          cards).
+                        </div>
+
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          Current mode:{" "}
+                          <strong>
+                            {cardMode === "manual"
+                              ? "Manual"
+                              : cardMode === "random"
+                              ? "Random"
+                              : "Not chosen"}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sequential: Card Formation UI */}
+                  {playMode === "sequential" && formatLocked && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: 12,
+                        background: "#fff",
+                        padding: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                          marginBottom: 6,
+                        }}
+                      >
+                        Form a Card (Sequential Mode)
+                      </div>
+                      <div
+                        style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
+                      >
+                        Select 2–4 unassigned players, then create a card.
+                      </div>
+
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 10,
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          marginBottom: 10,
+                        }}
+                      >
+                        <input
+                          placeholder="Card name (optional)"
+                          value={seqCardName}
+                          onChange={(e) => setSeqCardName(e.target.value)}
+                          style={{ ...inputStyle, width: 240 }}
+                          disabled={finalized}
+                        />
+                        <button
+                          onClick={createCardSequential}
+                          style={{
+                            ...smallButtonStyle,
+                            background: COLORS.navy,
+                            color: "white",
+                            border: `1px solid ${COLORS.navy}`,
+                          }}
+                          disabled={finalized}
+                        >
+                          Create Card
+                        </button>
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          Selected: <strong>{seqSelected.length}</strong> / 4
+                          (min 2)
+                        </div>
+                      </div>
+
+                      {seqUnassignedPlayers.length === 0 ? (
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          No unassigned players available.
+                        </div>
+                      ) : (
+                        <div style={{ display: "grid", gap: 8 }}>
+                          {seqUnassignedPlayers.map((p) => {
+                            const isSelected = seqSelected.includes(p.id);
+                            return (
+                              <label
+                                key={p.id}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  gap: 10,
+                                  padding: "10px 12px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${COLORS.border}`,
+                                  background: COLORS.soft,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    disabled={finalized}
+                                    onChange={() => toggleSeqSelect(p.id)}
+                                  />
+                                  <div style={{ fontWeight: 900 }}>
+                                    {p.name}
+                                  </div>
+                                </div>
+                                {poolMode === "split" ? (
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: 900,
+                                      color: COLORS.navy,
+                                    }}
+                                  >
+                                    {p.pool === "B"
+                                      ? "B Pool"
+                                      : p.pool === "C"
+                                      ? "C Pool"
+                                      : "A Pool"}
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                                    Combined
+                                  </div>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* CARDS */}
+          <div
+            style={{
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 14,
+              background: COLORS.soft,
+              padding: 12,
+              textAlign: "left",
+              marginBottom: 12,
+            }}
+          >
+            <div
+              onClick={() => setCardsOpen((v) => !v)}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                cursor: "pointer",
+                gap: 10,
+              }}
+            >
+              <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                {playMode === "sequential"
+                  ? `Cards Formed (${seqCards.length})`
+                  : `Cards — Round ${currentRound || 1}`}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                {cardsOpen ? "Tap to collapse" : "Tap to expand"}
+              </div>
+            </div>
+
+            {cardsOpen && (
+              <div style={{ marginTop: 10 }}>
+                {/* SIMULTANEOUS cards UI */}
+                {playMode === "simultaneous" && (
+                  <>
+                    {!roundStarted && cardMode === "manual" ? (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            opacity: 0.8,
+                            marginBottom: 10,
+                          }}
+                        >
+                          Create Round 1 cards (2–4 players). Pools can be
+                          mixed.
+                        </div>
+
+                        <div
+                          style={{
+                            border: `1px solid ${COLORS.border}`,
+                            background: "#fff",
+                            borderRadius: 12,
+                            padding: 10,
+                            marginBottom: 10,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 10,
+                              flexWrap: "wrap",
+                              alignItems: "center",
+                              marginBottom: 10,
+                            }}
+                          >
+                            <input
+                              placeholder="Card name (optional)"
+                              value={cardName}
+                              onChange={(e) => setCardName(e.target.value)}
+                              style={{ ...inputStyle, width: 240 }}
+                              disabled={finalized}
+                            />
+                            <button
+                              onClick={createCardSimultaneous}
+                              style={{
+                                ...smallButtonStyle,
+                                background: COLORS.navy,
+                                color: "white",
+                                border: `1px solid ${COLORS.navy}`,
+                              }}
+                              disabled={finalized}
+                            >
+                              Create Card
+                            </button>
+
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              Selected:{" "}
+                              <strong>{selectedForCard.length}</strong> / 4 (min
+                              2)
+                            </div>
+                          </div>
+
+                          <div style={{ display: "grid", gap: 8 }}>
+                            {normalizedPlayers.map((p) => {
+                              const isSelected = selectedForCard.includes(p.id);
+                              const already = r1Cards.some((c) =>
+                                (c.playerIds || []).includes(p.id)
+                              );
+
+                              return (
+                                <label
+                                  key={p.id}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    gap: 10,
+                                    padding: "10px 12px",
+                                    borderRadius: 12,
+                                    border: `1px solid ${COLORS.border}`,
+                                    background: already
+                                      ? "#fafafa"
+                                      : COLORS.soft,
+                                    opacity: already ? 0.6 : 1,
+                                    cursor: already ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 10,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      disabled={already || finalized}
+                                      onChange={() => toggleSelectForCard(p.id)}
+                                    />
+                                    <div style={{ fontWeight: 900 }}>
+                                      {p.name}
+                                    </div>
+                                  </div>
+                                  {poolMode === "split" ? (
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        fontWeight: 900,
+                                        color: COLORS.navy,
+                                      }}
+                                    >
+                                      {p.pool === "B"
+                                        ? "B Pool"
+                                        : p.pool === "C"
+                                        ? "C Pool"
+                                        : "A Pool"}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                                      Combined
+                                    </div>
+                                  )}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </>
+                    ) : roundStarted && currentRound >= 2 ? (
+                      <div
+                        style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
+                      >
+                        Cards for Round {currentRound} are auto-created based on
+                        Round {currentRound - 1} totals.
+                      </div>
+                    ) : !roundStarted ? (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          opacity: 0.75,
+                          marginBottom: 10,
+                        }}
+                      >
+                        Choose Manual or Random cards above. Round 1 requires
+                        all players be assigned to cards before starting.
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {(Array.isArray(cardsByRound[String(currentRound || 1)])
+                        ? cardsByRound[String(currentRound || 1)]
+                        : []
+                      ).map((c) => (
+                        <div
+                          key={c.id}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            border: `1px solid ${COLORS.border}`,
+                            background: "#fff",
+                          }}
+                        >
+                          <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                            {c.name}
+                            {roundStarted && currentRound ? (
+                              <span
+                                style={{
+                                  marginLeft: 8,
+                                  fontSize: 12,
+                                  opacity: 0.75,
+                                }}
+                              >
+                                {submitted?.[String(currentRound)]?.[c.id]
+                                  ? "✓ submitted"
+                                  : "not submitted"}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div style={{ marginTop: 6, fontSize: 14 }}>
+                            {(c.playerIds || []).map((pid) => {
+                              const p = normalizedPlayerById[pid];
+                              if (!p) return null;
+                              return (
+                                <div
+                                  key={pid}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                  }}
+                                >
+                                  <span style={{ fontWeight: 800 }}>
+                                    {p.name}
+                                  </span>
+                                  {poolMode === "split" ? (
+                                    <span
+                                      style={{
+                                        fontSize: 12,
+                                        fontWeight: 900,
+                                        color: COLORS.navy,
+                                      }}
+                                    >
+                                      {p.pool === "B"
+                                        ? "B Pool"
+                                        : p.pool === "C"
+                                        ? "C Pool"
+                                        : "A Pool"}
+                                    </span>
+                                  ) : (
+                                    <span
+                                      style={{ fontSize: 12, opacity: 0.7 }}
+                                    >
+                                      Combined
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {/* SEQUENTIAL cards UI */}
+                {playMode === "sequential" && (
+                  <>
+                    {seqCards.length === 0 ? (
+                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                        No cards yet. Use the Check-In section to form cards.
+                      </div>
+                    ) : (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {seqCards.map((c) => {
+                          const nextRound = seqNextRoundForCard(c.id);
+                          const done = nextRound === null;
+
+                          return (
+                            <div
+                              key={c.id}
+                              style={{
+                                border: `1px solid ${COLORS.border}`,
+                                borderRadius: 14,
+                                background: "#fff",
+                                padding: 12,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  gap: 10,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    fontWeight: 900,
+                                    color: COLORS.navy,
+                                  }}
+                                >
+                                  {c.name}{" "}
+                                  <span style={{ fontSize: 12, opacity: 0.75 }}>
+                                    {done
+                                      ? "✓ completed"
+                                      : `playing (next: Round ${nextRound})`}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div
+                                style={{
+                                  marginTop: 8,
+                                  display: "grid",
+                                  gap: 6,
+                                }}
+                              >
+                                {(c.playerIds || []).map((pid) => {
+                                  const p = normalizedPlayerById[pid];
+                                  if (!p) return null;
+                                  return (
+                                    <div
+                                      key={pid}
+                                      style={{
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                      }}
+                                    >
+                                      <span style={{ fontWeight: 800 }}>
+                                        {p.name}
+                                      </span>
+                                      {poolMode === "split" ? (
+                                        <span
+                                          style={{
+                                            fontSize: 12,
+                                            fontWeight: 900,
+                                            color: COLORS.navy,
+                                          }}
+                                        >
+                                          {p.pool === "B"
+                                            ? "B"
+                                            : p.pool === "C"
+                                            ? "C"
+                                            : "A"}{" "}
+                                          Pool
+                                        </span>
+                                      ) : (
+                                        <span
+                                          style={{ fontSize: 12, opacity: 0.7 }}
+                                        >
+                                          Combined
+                                        </span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {!done && (
+                                <div style={{ marginTop: 12 }}>
+                                  <div
+                                    style={{
+                                      fontWeight: 900,
+                                      color: COLORS.navy,
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    Round {nextRound} scores (0–50)
+                                  </div>
+
+                                  <div style={{ display: "grid", gap: 8 }}>
+                                    {(c.playerIds || []).map((pid) => {
+                                      const p = normalizedPlayerById[pid];
+                                      if (!p) return null;
+
+                                      const currentVal =
+                                        seqRoundScores?.[String(nextRound)]?.[
+                                          c.id
+                                        ]?.[pid];
+
+                                      return (
+                                        <div
+                                          key={pid}
+                                          style={{
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            gap: 10,
+                                            padding: "10px 12px",
+                                            borderRadius: 12,
+                                            border: `1px solid ${COLORS.border}`,
+                                            background: COLORS.soft,
+                                          }}
+                                        >
+                                          <div style={{ fontWeight: 900 }}>
+                                            {p.name}
+                                          </div>
+                                          <select
+                                            value={
+                                              currentVal === undefined ||
+                                              currentVal === null ||
+                                              currentVal === ""
+                                                ? ""
+                                                : String(currentVal)
+                                            }
+                                            disabled={finalized}
+                                            onChange={(e) =>
+                                              setSeqPlayerRoundScore(
+                                                nextRound,
+                                                c.id,
+                                                pid,
+                                                e.target.value === ""
+                                                  ? ""
+                                                  : Number(e.target.value)
+                                              )
+                                            }
+                                            style={{
+                                              ...inputStyle,
+                                              width: 96,
+                                              background: "#fff",
+                                              fontWeight: 900,
+                                              textAlign: "center",
+                                            }}
+                                          >
+                                            <option value="">—</option>
+                                            {Array.from(
+                                              { length: 51 },
+                                              (_, i) => i
+                                            ).map((n) => (
+                                              <option key={n} value={n}>
+                                                {n}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+
+                                  <button
+                                    onClick={() =>
+                                      submitSeqCardRound(c.id, nextRound)
+                                    }
+                                    disabled={finalized}
+                                    style={{
+                                      ...buttonStyle,
+                                      width: "100%",
+                                      marginTop: 10,
+                                      background: COLORS.green,
+                                      color: "white",
+                                      border: `1px solid ${COLORS.green}`,
+                                    }}
+                                  >
+                                    Submit Round {nextRound} Scores
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* SCOREKEEPER (SIMULTANEOUS ONLY) */}
+          {playMode === "simultaneous" && roundStarted ? (
+            <div
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 14,
+                background: "#fff",
+                padding: 12,
+                textAlign: "left",
+                marginBottom: 12,
+              }}
+            >
+              <div
+                style={{ fontWeight: 900, color: COLORS.navy, marginBottom: 8 }}
+              >
+                Scorekeeper
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                }}
+              >
+                <select
+                  value={activeCardId}
+                  onChange={(e) => {
+                    setActiveCardId(e.target.value);
+                    setOpenStations({});
+                  }}
+                  style={{ ...inputStyle, width: 280, background: "#fff" }}
+                >
+                  <option value="">Select your card…</option>
+                  {currentCards.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+
+                {activeCardId ? (
+                  <button
+                    onClick={() => {
+                      setActiveCardId("");
+                      setOpenStations({});
+                    }}
+                    style={{ ...smallButtonStyle, background: "#fff" }}
+                  >
+                    Change Card
+                  </button>
+                ) : null}
+              </div>
+
+              {activeCardId ? (
+                (() => {
+                  const card = currentCards.find((c) => c.id === activeCardId);
+                  if (!card) return null;
+
+                  const cardPlayers = (card.playerIds || [])
+                    .map((pid) => normalizedPlayerById[pid])
+                    .filter(Boolean);
+
+                  const alreadySubmitted =
+                    !!submitted?.[String(currentRound)]?.[card.id];
+
+                  return (
+                    <div style={{ marginTop: 14 }}>
+                      <div
+                        style={{
+                          fontWeight: 900,
+                          color: COLORS.navy,
+                          marginBottom: 10,
+                        }}
+                      >
+                        {card.name}{" "}
+                        {alreadySubmitted ? (
+                          <span style={{ color: COLORS.green, marginLeft: 8 }}>
+                            (submitted)
+                          </span>
+                        ) : (
+                          <span style={{ opacity: 0.6, marginLeft: 8 }}>
+                            (in progress)
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {Array.from({ length: stations }, (_, i) => i + 1).map(
+                          (stNum) => {
+                            const open = !!openStations[stNum];
+
+                            const stationRows = cardPlayers.map((p) => {
+                              const made = madeFor(currentRound, stNum, p.id);
+                              return {
+                                id: p.id,
+                                name: p.name,
+                                pool: p.pool,
+                                made,
+                                pts: pointsForMade(made ?? 0),
+                              };
+                            });
+
+                            return (
+                              <div
+                                key={stNum}
+                                style={{
+                                  border: `1px solid ${COLORS.border}`,
+                                  borderRadius: 14,
+                                  background: COLORS.soft,
+                                  overflow: "hidden",
+                                }}
+                              >
+                                <div
+                                  onClick={() => toggleStation(stNum)}
+                                  style={{
+                                    padding: "12px 12px",
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      fontWeight: 900,
+                                      color: COLORS.navy,
+                                    }}
+                                  >
+                                    Station {stNum}
+                                  </div>
+                                  <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                    {open ? "Tap to collapse" : "Tap to expand"}
+                                  </div>
+                                </div>
+
+                                {open && (
+                                  <div
+                                    style={{ padding: 12, background: "#fff" }}
+                                  >
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        opacity: 0.75,
+                                        marginBottom: 10,
+                                      }}
+                                    >
+                                      Blank means “not entered yet.” (4=5pts,
+                                      3=3pts, 2=2pts, 1=1pt, 0=0)
+                                    </div>
+
+                                    <div style={{ display: "grid", gap: 8 }}>
+                                      {stationRows.map((row) => (
+                                        <div
+                                          key={row.id}
+                                          style={{
+                                            display: "grid",
+                                            gridTemplateColumns:
+                                              "1fr auto auto",
+                                            alignItems: "center",
+                                            gap: 10,
+                                            padding: "10px 12px",
+                                            borderRadius: 12,
+                                            border: `1px solid ${COLORS.border}`,
+                                            background: COLORS.soft,
+                                            opacity: alreadySubmitted
+                                              ? 0.75
+                                              : 1,
+                                            minWidth: 0,
+                                          }}
+                                        >
+                                          <div style={{ minWidth: 0 }}>
+                                            <div
+                                              style={{
+                                                fontWeight: 900,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                              }}
+                                            >
+                                              {row.name}{" "}
+                                              {poolMode === "split" ? (
+                                                <span
+                                                  style={{
+                                                    fontSize: 12,
+                                                    opacity: 0.75,
+                                                  }}
+                                                >
+                                                  (
+                                                  {row.pool === "B"
+                                                    ? "B"
+                                                    : row.pool === "C"
+                                                    ? "C"
+                                                    : "A"}
+                                                  )
+                                                </span>
+                                              ) : null}
+                                            </div>
+                                          </div>
+
+                                          <select
+                                            value={
+                                              row.made === null
+                                                ? ""
+                                                : String(row.made)
+                                            }
+                                            disabled={
+                                              alreadySubmitted || finalized
+                                            }
+                                            onChange={(e) =>
+                                              setMade(
+                                                currentRound,
+                                                stNum,
+                                                row.id,
+                                                e.target.value === ""
+                                                  ? ""
+                                                  : Number(e.target.value)
+                                              )
+                                            }
+                                            style={{
+                                              ...inputStyle,
+                                              width: 84,
+                                              background: "#fff",
+                                              fontWeight: 900,
+                                              textAlign: "center",
+                                              justifySelf: "end",
+                                            }}
+                                          >
+                                            <option value="">—</option>
+                                            {[0, 1, 2, 3, 4].map((m) => (
+                                              <option key={m} value={m}>
+                                                {m}
+                                              </option>
+                                            ))}
+                                          </select>
+
+                                          <div
+                                            style={{
+                                              textAlign: "right",
+                                              fontWeight: 900,
+                                              color: COLORS.navy,
+                                              justifySelf: "end",
+                                              whiteSpace: "nowrap",
+                                            }}
+                                          >
+                                            {row.pts} pts
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+                        )}
+                      </div>
+
+                      <div style={{ marginTop: 14 }}>
+                        <div
+                          style={{
+                            fontWeight: 900,
+                            color: COLORS.navy,
+                            marginBottom: 8,
+                          }}
+                        >
+                          Round {currentRound} Totals (This Card)
+                        </div>
+
+                        <div style={{ display: "grid", gap: 8 }}>
+                          {cardPlayers.map((p) => {
+                            const total = roundTotalForPlayer(
+                              currentRound,
+                              p.id
+                            );
+                            return (
+                              <div
+                                key={p.id}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${COLORS.border}`,
+                                  background: "#fff",
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  gap: 10,
+                                }}
+                              >
+                                <div style={{ fontWeight: 900 }}>{p.name}</div>
+                                <div
+                                  style={{
+                                    fontWeight: 900,
+                                    color: COLORS.navy,
+                                  }}
+                                >
+                                  {total} pts
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 14 }}>
+                        <button
+                          onClick={() => submitCardScores(card.id)}
+                          disabled={alreadySubmitted || finalized}
+                          style={{
+                            ...buttonStyle,
+                            width: "100%",
+                            background: alreadySubmitted
+                              ? "#ddd"
+                              : COLORS.green,
+                            color: alreadySubmitted ? "#444" : "white",
+                            border: `1px solid ${
+                              alreadySubmitted ? "#ddd" : COLORS.green
+                            }`,
+                          }}
+                        >
+                          {alreadySubmitted
+                            ? "Card Submitted (Locked)"
+                            : "Submit Card Scores"}
+                        </button>
+
+                        {/* ✅ Removed confusing admin-password text */}
+                        <div
+                          style={{
+                            marginTop: 8,
+                            fontSize: 12,
+                            opacity: 0.75,
+                            textAlign: "center",
+                          }}
+                        >
+                          Submitting locks this card for this round.
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                  Select your card to start scoring.
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {/* LEADERBOARDS */}
+          <div style={{ textAlign: "left" }}>
+            <div
+              onClick={() => setLeaderboardsOpen((v) => !v)}
+              style={{
+                fontWeight: 900,
+                color: COLORS.navy,
+                marginBottom: 8,
+                cursor: "pointer",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 12px",
+                borderRadius: 14,
+                border: `1px solid ${COLORS.border}`,
+                background: "#fff",
+              }}
+            >
+              <span>
+                Leaderboards{" "}
+                {playMode === "sequential"
+                  ? "(Only Submitted Rounds)"
+                  : "(Cumulative)"}
+                {" — "}
+                {poolMode === "combined" ? "Combined Pool" : "Split Pool"}
+              </span>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>
+                {leaderboardsOpen ? "Tap to hide" : "Tap to show"}
+              </span>
+            </div>
+
+            {leaderboardsOpen && (
+              <div style={{ display: "grid", gap: 10 }}>
+                {(poolMode === "combined" ? ["A"] : ["A", "B", "C"]).map(
+                  (k) => {
+                    const label =
+                      poolMode === "combined"
+                        ? "All Players"
+                        : k === "A"
+                        ? "A Pool"
+                        : k === "B"
+                        ? "B Pool"
+                        : "C Pool";
+
+                    const rows = leaderboardData[k] || [];
+                    const ranks = computeTiedRanks(rows);
+
+                    return (
+                      <div
+                        key={k}
+                        style={{
+                          border: `1px solid ${COLORS.border}`,
+                          borderRadius: 14,
+                          background: "#fff",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: "12px 12px",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 10,
+                            background: COLORS.soft,
+                          }}
+                        >
+                          <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                            {label}{" "}
+                            <span style={{ fontSize: 12, opacity: 0.75 }}>
+                              ({rows.length})
+                            </span>
+                          </div>
+                        </div>
+
+                        <div style={{ padding: 12 }}>
+                          {rows.length === 0 ? (
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                              No players yet.
+                            </div>
+                          ) : (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              {rows.map((r, idx) => {
+                                const place = ranks[idx] || idx + 1;
+                                const isPaid =
+                                  payoutsEnabled &&
+                                  finalized &&
+                                  hasPostedPayouts &&
+                                  Number(r.payoutDollars || 0) > 0;
+
+                                return (
+                                  <div
+                                    key={r.id}
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: 12,
+                                      border: `1px solid ${COLORS.border}`,
+                                      background: COLORS.soft,
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      gap: 10,
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: 10,
+                                        alignItems: "center",
+                                        minWidth: 0,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: 34,
+                                          height: 34,
+                                          borderRadius: 12,
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          fontWeight: 900,
+                                          color: "white",
+                                          background: isPaid
+                                            ? COLORS.green
+                                            : COLORS.navy,
+                                          flexShrink: 0,
+                                        }}
+                                      >
+                                        {place}
+                                      </div>
+
+                                      <div style={{ minWidth: 0 }}>
+                                        <div
+                                          style={{
+                                            fontWeight: 900,
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          {r.name}
+                                          {playMode === "sequential" ? (
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                marginLeft: 8,
+                                                opacity: 0.75,
+                                              }}
+                                            >
+                                              — through round{" "}
+                                              {r.throughRound || 0}
+                                            </span>
+                                          ) : null}
+
+                                          {r.adj ? (
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                marginLeft: 8,
+                                                opacity: 0.75,
+                                              }}
+                                            >
+                                              (adj {r.adj > 0 ? "+" : ""}
+                                              {r.adj})
+                                            </span>
+                                          ) : null}
+
+                                          {payoutsEnabled &&
+                                          finalized &&
+                                          hasPostedPayouts &&
+                                          Number(r.payoutDollars || 0) > 0 ? (
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                marginLeft: 10,
+                                                fontWeight: 900,
+                                                color: COLORS.green,
+                                              }}
+                                            >
+                                              ${Number(r.payoutDollars || 0)}
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div
+                                      style={{
+                                        fontWeight: 900,
+                                        color: COLORS.navy,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      {r.total} pts
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+                )}
+              </div>
+            )}
+          </div>
+
+          <div
+            style={{
+              marginTop: 14,
+              fontSize: 12,
+              opacity: 0.55,
+              textAlign: "center",
+            }}
+          >
+            {APP_VERSION} • Developed by Eli Morgan
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
