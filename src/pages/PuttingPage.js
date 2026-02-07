@@ -285,22 +285,6 @@ export default function PuttingPage() {
     padding: "8px 12px",
   };
 
-  // ✅ Matches the Tags page: visible "Go to Home" button
-  const goHomeStyle = {
-    position: "absolute",
-    left: 18,
-    top: 18,
-    padding: "8px 12px",
-    borderRadius: 10,
-    background: "#4b4b4b",
-    color: "white",
-    fontWeight: 900,
-    textDecoration: "none",
-    border: "1px solid rgba(0,0,0,0.2)",
-    boxShadow: "0 6px 16px rgba(0,0,0,0.18)",
-    lineHeight: 1,
-  };
-
   // ✅ Firestore ref is now based on selected league (URL param)
   const leagueRef = useMemo(() => {
     if (!leagueId) return null;
@@ -1338,18 +1322,24 @@ export default function PuttingPage() {
             padding: 26,
             border: `2px solid ${COLORS.navy}`,
             boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
-            position: "relative", // ✅ required so the Go to Home button can anchor like Tags page
           }}
         >
-          {/* ✅ Back-to-league HOME button (matches Tags behavior/visibility) */}
-          <NavLink to={`/league/${leagueId}`} style={goHomeStyle}>
-            Go to Home
-          </NavLink>
-
           <Header />
 
+          {/* ✅ League line now matches Tag page: "League: X • Back to League" */}
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
             League: <strong>{leagueId}</strong>
+            <span style={{ margin: "0 8px", opacity: 0.6 }}>•</span>
+            <NavLink
+              to={`/league/${leagueId}`}
+              style={{
+                fontWeight: 900,
+                color: COLORS.navy,
+                textDecoration: "none",
+              }}
+            >
+              Back to League
+            </NavLink>
           </div>
 
           <div
