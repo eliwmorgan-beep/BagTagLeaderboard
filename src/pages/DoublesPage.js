@@ -1,12 +1,12 @@
 // src/pages/DoublesPage.js
 import React, { useEffect, useMemo, useState } from "react";
+import { useParams, NavLink } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import { doc, onSnapshot, setDoc, updateDoc } from "firebase/firestore";
 
-const LEAGUE_ID = "default-league";
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "doubles-v1.5.5";
+const APP_VERSION = "doubles-v1.5.6-perleague";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -32,7 +32,7 @@ function scoreLabel(n) {
 
 // ----------------- Payout helpers (Team payouts) -----------------
 const DEFAULT_PAYOUT_CONFIG = {
-  enabled: true, // ✅ new
+  enabled: true,
   buyInDollars: 5, // per PLAYER buy-in (pot uses total players checked in)
   leagueFeePct: 10,
   updatedAt: null,
@@ -69,12 +69,6 @@ function sharesByPlaces(nPlaces) {
   return [];
 }
 
-/**
- * Whole-dollar allocation by shares:
- * - uses whole dollars only
- * - never exceeds potDollars
- * - sums to potDollars (when potDollars > 0)
- */
 function allocateWholeDollarsByShares(positionShares, potCents) {
   const n = positionShares.length;
   if (!n || potCents <= 0) return [];
@@ -131,16 +125,6 @@ function allocateWholeDollarsByShares(positionShares, potCents) {
   return out;
 }
 
-/**
- * Tie-aware payout distribution for TEAMS:
- * rowsSorted should be sorted by score ASC (lower is better):
- *   [{ teamId, score }]
- * positionShares: for positions 1..N
- * Returns: { [teamId]: cents } (whole-dollar cents)
- *
- * Tie logic: a tie group shares the combined dollars of the positions it spans,
- * split evenly (extra $1 remainders distributed within the group).
- */
 function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
   const nPositions = positionShares.length;
   if (!rowsSorted.length || nPositions === 0 || potCents <= 0) return {};
@@ -156,7 +140,7 @@ function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
     else last.members.push(r);
   }
 
-  let pos = 1; // 1-based
+  let pos = 1;
   for (const g of groups) {
     const groupSize = g.members.length;
     const start = pos;
@@ -208,11 +192,6 @@ function computeTieAwarePayoutsForTeams(rowsSorted, positionShares, potCents) {
   return payouts;
 }
 
-/**
- * Tie-aware placements for leaderboard display.
- * rowsSorted must already be sorted by score ASC (lower is better).
- * Competition ranking.
- */
 function computeTiePlacesAsc(rowsSorted) {
   const places = {};
   let lastScore = null;
@@ -244,8 +223,9 @@ function rangeOptions(min, max) {
   return out;
 }
 
-// ----------------- Page -----------------
 export default function DoublesPage() {
+  const { leagueId } = useParams();
+
   const COLORS = {
     blueLight: "#e6f3ff",
     navy: "#1b1f5a",
@@ -258,60 +238,44 @@ export default function DoublesPage() {
     soft: "#f6fbff",
   };
 
-  const leagueRef = useMemo(() => doc(db, "leagues", LEAGUE_ID), []);
-  const [loading, setLoading] = useState(true);
+  const leagueRef = useMemo(() => doc(db, "leagues", leagueId), [leagueId]);
 
-  // Doubles state from Firestore
+  const [loading, setLoading] = useState(true);
   const [doubles, setDoubles] = useState(null);
 
-  // UI state
   const [todayExpanded, setTodayExpanded] = useState(true);
   const [checkinExpanded, setCheckinExpanded] = useState(true);
   const [adminExpanded, setAdminExpanded] = useState(false);
 
-  // Check-in UI
   const [checkinName, setCheckinName] = useState("");
   const [checkinPool, setCheckinPool] = useState("A");
 
-  // Start round feedback (in Today's Format)
   const [startRoundMsg, setStartRoundMsg] = useState("");
   const [startRoundMsgColor, setStartRoundMsgColor] = useState(COLORS.muted);
 
-  // Admin settings UI
-  const [formatChoice, setFormatChoice] = useState("random"); // "random" | "seated"
-  const [caliMode, setCaliMode] = useState("random"); // "random" | "manual"
+  const [formatChoice, setFormatChoice] = useState("random");
+  const [caliMode, setCaliMode] = useState("random");
   const [manualCaliId, setManualCaliId] = useState("");
   const [layoutNote, setLayoutNote] = useState("");
 
-  // Cards UI
   const [expandedCardId, setExpandedCardId] = useState(null);
+  const [scoreDraftByTeam, setScoreDraftByTeam] = useState({});
 
-  // ✅ TEAM scoring (not card scoring)
-  const [scoreDraftByTeam, setScoreDraftByTeam] = useState({}); // teamId -> score
+  const [submitMsgByCard, setSubmitMsgByCard] = useState({});
+  const [submitMsgColorByCard, setSubmitMsgColorByCard] = useState({});
 
-  // ✅ Single submit button per card feedback
-  const [submitMsgByCard, setSubmitMsgByCard] = useState({}); // cardId -> string
-  const [submitMsgColorByCard, setSubmitMsgColorByCard] = useState({}); // cardId -> color
-
-  // Admin: edit holes
   const [editHolesOpen, setEditHolesOpen] = useState(false);
-  const [holeEdits, setHoleEdits] = useState({}); // cardId -> holeNumber
+  const [holeEdits, setHoleEdits] = useState({});
 
-  // Admin: late player
   const [lateName, setLateName] = useState("");
   const [latePool, setLatePool] = useState("A");
   const [lateCardId, setLateCardId] = useState("");
   const [lateMsg, setLateMsg] = useState("");
 
-  // ✅ Payout UI (Teams)
   const [payoutsOpen, setPayoutsOpen] = useState(false);
-
-  // ✅ Enable payouts toggle
   const [payoutEnabled, setPayoutEnabled] = useState(
     !!DEFAULT_PAYOUT_CONFIG.enabled
   );
-
-  // ✅ now SELECT values (0..50)
   const [payoutBuyIn, setPayoutBuyIn] = useState(
     DEFAULT_PAYOUT_CONFIG.buyInDollars
   );
@@ -319,128 +283,104 @@ export default function DoublesPage() {
     DEFAULT_PAYOUT_CONFIG.leagueFeePct
   );
 
-  // ✅ Admin unlock window (device-specific, persists across refresh)
-  const ADMIN_OK_KEY = useMemo(
-    () => `dg_admin_ok_until_doubles_${LEAGUE_ID}`,
-    []
-  );
-  const [adminOkUntil, setAdminOkUntil] = useState(() => {
-    const raw = localStorage.getItem(ADMIN_OK_KEY);
-    const n = Number(raw || 0);
-    return Number.isFinite(n) ? n : 0;
-  });
+  // ✅ device-specific admin unlock window (in-memory only for this device/tab)
+  const [adminOkUntil, setAdminOkUntil] = useState(0);
 
-  function setAdminOkUntilPersist(ms) {
-    setAdminOkUntil(ms);
-    try {
-      localStorage.setItem(ADMIN_OK_KEY, String(ms));
-    } catch {
-      // ignore storage failures
-    }
-  }
-
-  // Ensure baseline shape
   const defaultDoubles = useMemo(
     () => ({
       started: false,
-      format: "random", // random | seated
-      caliMode: "random", // random | manual
+      format: "random",
+      caliMode: "random",
       manualCaliId: "",
       layoutNote: "",
-      checkins: [], // [{id,name,pool}]
+      checkins: [],
       cali: { playerId: "", teammateId: "" },
-      cards: [], // [{id, startHole, teams:[{id,type:"doubles"|"cali", players:[{id,name,pool}]}]}]
-      submissions: {}, // teamId -> {submittedAt, score, label, playersText, teamName, cardId}
-      leaderboard: [], // [{teamId, teamName, playersText, score}]
+      cards: [],
+      submissions: {},
+      leaderboard: [],
       payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
-      payoutsPosted: {}, // teamId -> cents
+      payoutsPosted: {},
       updatedAt: Date.now(),
     }),
     []
   );
 
-  // Admin-only helper: password on click (10 min unlock)
   async function requireAdmin(fn) {
     const now = Date.now();
-
-    // refresh from storage (in case another tab updated it)
-    let okUntil = adminOkUntil;
-    try {
-      const raw = localStorage.getItem(ADMIN_OK_KEY);
-      const n = Number(raw || 0);
-      if (Number.isFinite(n)) okUntil = n;
-    } catch {}
-
-    if (now < okUntil) return fn();
+    if (now < adminOkUntil) return fn();
 
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
     }
-
-    const next = now + 10 * 60 * 1000;
-    setAdminOkUntilPersist(next);
+    setAdminOkUntil(now + 10 * 60 * 1000);
     return fn();
   }
 
   useEffect(() => {
-    ensureAnonAuth().catch(() => {});
-    const unsub = onSnapshot(
-      leagueRef,
-      async (snap) => {
-        if (!snap.exists()) {
-          await setDoc(
-            leagueRef,
-            { doubles: defaultDoubles, createdAt: Date.now() },
-            { merge: true }
-          );
+    let unsub = () => {};
+
+    (async () => {
+      await ensureAnonAuth();
+
+      unsub = onSnapshot(
+        leagueRef,
+        async (snap) => {
+          if (!snap.exists()) {
+            await setDoc(
+              leagueRef,
+              { doubles: defaultDoubles, createdAt: Date.now() },
+              { merge: true }
+            );
+            setLoading(false);
+            return;
+          }
+
+          const data = snap.data() || {};
+          const d = data.doubles || defaultDoubles;
+
+          const safe = {
+            ...defaultDoubles,
+            ...d,
+            payoutConfig:
+              d.payoutConfig && typeof d.payoutConfig === "object"
+                ? { ...DEFAULT_PAYOUT_CONFIG, ...d.payoutConfig }
+                : { ...DEFAULT_PAYOUT_CONFIG },
+            payoutsPosted:
+              d.payoutsPosted && typeof d.payoutsPosted === "object"
+                ? d.payoutsPosted
+                : {},
+          };
+
+          setDoubles(safe);
           setLoading(false);
-          return;
-        }
-        const data = snap.data() || {};
-        const d = data.doubles || defaultDoubles;
 
-        // backfill payout fields if older docs
-        const safe = {
-          ...defaultDoubles,
-          ...d,
-          payoutConfig:
-            d.payoutConfig && typeof d.payoutConfig === "object"
-              ? { ...DEFAULT_PAYOUT_CONFIG, ...d.payoutConfig }
-              : { ...DEFAULT_PAYOUT_CONFIG },
-          payoutsPosted:
-            d.payoutsPosted && typeof d.payoutsPosted === "object"
-              ? d.payoutsPosted
-              : {},
-        };
+          setFormatChoice(safe.format || "random");
+          setCaliMode(safe.caliMode || "random");
+          setManualCaliId(safe.manualCaliId || "");
+          setLayoutNote(safe.layoutNote || "");
 
-        setDoubles(safe);
-        setLoading(false);
+          const enabled =
+            safe.payoutConfig?.enabled === undefined
+              ? !!DEFAULT_PAYOUT_CONFIG.enabled
+              : !!safe.payoutConfig.enabled;
+          setPayoutEnabled(enabled);
 
-        // keep admin UI synced
-        setFormatChoice(safe.format || "random");
-        setCaliMode(safe.caliMode || "random");
-        setManualCaliId(safe.manualCaliId || "");
-        setLayoutNote(safe.layoutNote || "");
+          setPayoutBuyIn(clampInt(safe.payoutConfig?.buyInDollars, 0, 50));
+          setPayoutFeePct(clampInt(safe.payoutConfig?.leagueFeePct, 0, 50));
 
-        // sync payout UI fields
-        const enabled =
-          safe.payoutConfig?.enabled === undefined
-            ? !!DEFAULT_PAYOUT_CONFIG.enabled
-            : !!safe.payoutConfig.enabled;
-        setPayoutEnabled(enabled);
+          if (!lateCardId && (safe.cards || []).length) {
+            setLateCardId(safe.cards[0].id);
+          }
+        },
+        () => setLoading(false)
+      );
+    })().catch((e) => {
+      console.error(e);
+      setLoading(false);
+    });
 
-        setPayoutBuyIn(clampInt(safe.payoutConfig?.buyInDollars, 0, 50));
-        setPayoutFeePct(clampInt(safe.payoutConfig?.leagueFeePct, 0, 50));
-
-        // default late card selection
-        if (!lateCardId && (safe.cards || []).length) {
-          setLateCardId(safe.cards[0].id);
-        }
-      },
-      () => setLoading(false)
-    );
     return () => unsub();
   }, [leagueRef, defaultDoubles, lateCardId]);
 
@@ -456,11 +396,11 @@ export default function DoublesPage() {
       ? { ...DEFAULT_PAYOUT_CONFIG, ...doubles.payoutConfig }
       : { ...DEFAULT_PAYOUT_CONFIG };
   const payoutsPosted =
-    doubles?.payoutsPosted && typeof doubles.payoutsPosted === "object"
+    doubles?.payoutsPosted && typeof doubles?.payoutsPosted === "object"
       ? doubles.payoutsPosted
       : {};
 
-  const payoutsAreEnabled = payoutConfig?.enabled !== false; // default true
+  const payoutsAreEnabled = payoutConfig?.enabled !== false;
   const hasPostedPayouts =
     payoutsAreEnabled && Object.keys(payoutsPosted || {}).length > 0;
 
@@ -483,7 +423,6 @@ export default function DoublesPage() {
     return { fmtLabel, caliLabel };
   }, [doubles]);
 
-  // Tie-aware places for leaderboard (ASC scoring)
   const tiePlaces = useMemo(() => {
     const rowsSorted = [...leaderboard].sort(
       (a, b) => Number(a.score ?? 0) - Number(b.score ?? 0)
@@ -555,7 +494,6 @@ export default function DoublesPage() {
       };
     }
 
-    // random
     let chosen = null;
     if (mode === "manual" && manualId)
       chosen = checkinsList.find((p) => p.id === manualId) || null;
@@ -629,7 +567,6 @@ export default function DoublesPage() {
       }
     }
 
-    // build cards: 2 teams per card, hole gap of 2
     const cardTeams = [...teams];
     const cardsOut = [];
     let startHole = 1;
@@ -684,7 +621,6 @@ export default function DoublesPage() {
     return names.join(", ");
   }
 
-  // ✅ Start round (Make Teams & Cards) at bottom of Today's Format
   async function handleStartRound() {
     setStartRoundMsg("");
     setStartRoundMsgColor(COLORS.muted);
@@ -723,7 +659,7 @@ export default function DoublesPage() {
           "doubles.cards": built.cardsOut,
           "doubles.submissions": {},
           "doubles.leaderboard": [],
-          "doubles.payoutsPosted": {}, // reset posted payouts for new round
+          "doubles.payoutsPosted": {},
           "doubles.updatedAt": Date.now(),
         });
 
@@ -744,6 +680,7 @@ export default function DoublesPage() {
     await requireAdmin(async () => {
       await updateDoc(leagueRef, {
         doubles: defaultDoubles,
+        "doubles.updatedAt": Date.now(),
       });
 
       setExpandedCardId(null);
@@ -761,7 +698,6 @@ export default function DoublesPage() {
     });
   }
 
-  // ✅ Submit ALL team scores for a card with a single button
   async function submitCardScores(cardId) {
     const card = cards.find((c) => c.id === cardId);
     if (!card) return;
@@ -775,7 +711,6 @@ export default function DoublesPage() {
     for (const t of card.teams || []) {
       const raw = scoreDraftByTeam[t.id];
 
-      // allow 0; disallow empty
       if (raw === "" || raw === null || raw === undefined) {
         missing.push(teamDisplay(t));
         continue;
@@ -804,7 +739,6 @@ export default function DoublesPage() {
       return;
     }
 
-    // rebuild leaderboard from ALL submissions
     const lb = Object.entries(nextSubmissions).map(([id, s]) => ({
       teamId: id,
       teamName: s.teamName || "Team",
@@ -956,7 +890,6 @@ export default function DoublesPage() {
     });
   }
 
-  // ----------------- Payout actions (Team payouts) -----------------
   function computeTeamPayoutsCents() {
     if (!payoutsAreEnabled)
       return { ok: false, reason: "Payouts are disabled." };
@@ -980,10 +913,7 @@ export default function DoublesPage() {
     const shares = sharesByPlaces(nPlaces);
 
     const rowsSorted = [...leaderboard]
-      .map((r) => ({
-        teamId: r.teamId,
-        score: Number(r.score ?? 0),
-      }))
+      .map((r) => ({ teamId: r.teamId, score: Number(r.score ?? 0) }))
       .sort((a, b) => a.score - b.score);
 
     const payouts = computeTieAwarePayoutsForTeams(
@@ -1020,7 +950,7 @@ export default function DoublesPage() {
           leagueFeePct: feePct,
           updatedAt: Date.now(),
         },
-        "doubles.payoutsPosted": {}, // clear posted payouts when config changes
+        "doubles.payoutsPosted": {},
         "doubles.updatedAt": Date.now(),
       });
 
@@ -1033,7 +963,7 @@ export default function DoublesPage() {
     await requireAdmin(async () => {
       await updateDoc(leagueRef, {
         "doubles.payoutConfig.enabled": !!nextEnabled,
-        "doubles.payoutsPosted": {}, // ✅ clear any posted payouts when toggling
+        "doubles.payoutsPosted": {},
         "doubles.updatedAt": Date.now(),
       });
 
@@ -1158,8 +1088,29 @@ export default function DoublesPage() {
 
   return (
     <div style={pageWrap}>
-      <div style={container}>
+      <div style={{ width: "100%", maxWidth: 860 }}>
         <Header />
+
+        <div
+          style={{
+            marginTop: 8,
+            fontSize: 12,
+            opacity: 0.75,
+            textAlign: "center",
+          }}
+        >
+          League: <b>{leagueId}</b> <span style={{ opacity: 0.6 }}>•</span>{" "}
+          <NavLink
+            to={`/league/${encodeURIComponent(leagueId)}`}
+            style={{
+              fontWeight: 900,
+              color: COLORS.navy,
+              textDecoration: "none",
+            }}
+          >
+            Back to League
+          </NavLink>
+        </div>
 
         {/* 1) Today's Format */}
         <div style={{ marginTop: 14, ...cardStyle }}>
@@ -1196,13 +1147,19 @@ export default function DoublesPage() {
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <b>Check-in:</b>{" "}
-                  {(() => {
-                    if (!checkins.length) return "No players checked in yet.";
-                    if (!isSeated) return `${checkins.length} player(s) checked in.`;
-                    const a = checkins.filter((p) => p.pool === "A").length;
-                    const b = checkins.filter((p) => p.pool === "B").length;
-                    return `${checkins.length} checked in (A: ${a}, B: ${b}).`;
-                  })()}
+                  {checkins.length
+                    ? !isSeated
+                      ? `${checkins.length} player(s) checked in.`
+                      : (() => {
+                          const a = checkins.filter(
+                            (p) => p.pool === "A"
+                          ).length;
+                          const b = checkins.filter(
+                            (p) => p.pool === "B"
+                          ).length;
+                          return `${checkins.length} checked in (A: ${a}, B: ${b}).`;
+                        })()
+                    : "No players checked in yet."}
                 </div>
                 <div style={{ marginTop: 6 }}>
                   <b>Payouts:</b>{" "}
@@ -1267,7 +1224,7 @@ export default function DoublesPage() {
           )}
         </div>
 
-        {/* 2) Player Check-in (disappears after start) */}
+        {/* 2) Player Check-in */}
         {!started && (
           <div style={{ marginTop: 14, ...cardStyle }}>
             <div
@@ -1373,10 +1330,10 @@ export default function DoublesPage() {
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
               {cards.map((c, idx) => {
                 const isOpen = expandedCardId === c.id;
-
                 const teamIds = (c.teams || []).map((t) => t.id);
-                const submittedCount = teamIds.filter((id) => !!submissions[id])
-                  .length;
+                const submittedCount = teamIds.filter(
+                  (id) => !!submissions[id]
+                ).length;
 
                 return (
                   <div
@@ -1811,14 +1768,13 @@ export default function DoublesPage() {
                 </div>
               </div>
 
-              {/* ✅ Payouts (Team) */}
+              {/* Payouts */}
               <div style={{ ...cardStyle, padding: 12 }}>
                 <div style={{ fontWeight: 1000, color: COLORS.navy }}>
                   Payouts (Teams)
                 </div>
 
                 <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                  {/* Enable toggle */}
                   <div
                     style={{
                       display: "flex",
@@ -1909,9 +1865,7 @@ export default function DoublesPage() {
                           background: "#fff",
                         }}
                         onClick={() =>
-                          requireAdmin(async () => {
-                            setPayoutsOpen((v) => !v);
-                          })
+                          requireAdmin(async () => setPayoutsOpen((v) => !v))
                         }
                       >
                         {payoutsOpen
@@ -2167,10 +2121,16 @@ export default function DoublesPage() {
                       ))}
 
                       <div style={{ display: "flex", gap: 10 }}>
-                        <button style={button(true)} onClick={saveStartingHoleEdits}>
+                        <button
+                          style={button(true)}
+                          onClick={saveStartingHoleEdits}
+                        >
                           Save (Admin)
                         </button>
-                        <button style={button(false)} onClick={() => setEditHolesOpen(false)}>
+                        <button
+                          style={button(false)}
+                          onClick={() => setEditHolesOpen(false)}
+                        >
                           Cancel
                         </button>
                       </div>
@@ -2207,7 +2167,8 @@ export default function DoublesPage() {
             textAlign: "center",
           }}
         >
-          {APP_VERSION} • Pot is computed from player check-ins (buy-in per player) • Payouts are posted to teams
+          {APP_VERSION} • League: {leagueId} • Pot is computed from player
+          check-ins (buy-in per player) • Payouts are posted to teams
         </div>
 
         <div style={{ height: 30 }} />
