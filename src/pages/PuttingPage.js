@@ -620,7 +620,6 @@ export default function PuttingPage() {
     );
 
     return groups;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     players,
     cards,
