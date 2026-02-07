@@ -1,31 +1,30 @@
+// src/components/Header.js
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 export default function Header() {
-  const navigate = useNavigate();
-
   const COLORS = {
     navy: "#1b1f5a",
     orange: "#f4a83a",
   };
 
   return (
-    <button
-      onClick={() => navigate("/")}
+    <Link
+      to="/"
       style={{
-        appearance: "none",
-        WebkitAppearance: "none",
-        border: "none",
-        background: "transparent",
-        padding: 0,
-        cursor: "pointer",
-        width: "100%",
+        textDecoration: "none",
         display: "block",
+        width: "100%",
       }}
       aria-label="Go to Home"
       title="Go to Home"
     >
-      <div style={{ textAlign: "center" }}>
+      <div
+        style={{
+          textAlign: "center",
+          cursor: "pointer",
+        }}
+      >
         <img
           src="/pescado-logo.png"
           alt="Pescado Mojado logo"
@@ -44,6 +43,6 @@ export default function Header() {
           Pescado Mojado
         </h1>
       </div>
-    </button>
+    </Link>
   );
 }
