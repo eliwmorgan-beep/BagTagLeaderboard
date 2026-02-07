@@ -58,6 +58,11 @@ export default function HomePage() {
             <NavLink to="/doubles" style={buttonStyle}>
               Doubles
             </NavLink>
+
+            {/* ✅ NEW LEAGUE BUTTON */}
+            <NavLink to="/league" style={buttonStyle}>
+              League
+            </NavLink>
           </div>
         </div>
       </div>
