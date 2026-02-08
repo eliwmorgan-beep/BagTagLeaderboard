@@ -14,6 +14,11 @@ export default function LeaguePage() {
 
   const [leagueId, setLeagueId] = useState("");
 
+  // Go-to-league messaging
+  const [goMsg, setGoMsg] = useState("");
+  const [goMsgColor, setGoMsgColor] = useState("rgba(0,0,0,0.65)");
+  const [goBusy, setGoBusy] = useState(false);
+
   // Create league (admin)
   const [newLeagueId, setNewLeagueId] = useState("");
   const [createMsg, setCreateMsg] = useState("");
@@ -102,6 +107,7 @@ export default function LeaguePage() {
     ...btnBase,
     background: COLORS.navy,
     color: "white",
+    opacity: goBusy ? 0.7 : 1,
   };
 
   const createBtn = {
@@ -109,6 +115,11 @@ export default function LeaguePage() {
     background: COLORS.orange,
     color: COLORS.navy,
   };
+
+  function isValidLeagueId(id) {
+    // simple & safe: letters/numbers/_/-
+    return /^[a-z0-9_-]{2,40}$/i.test(id);
+  }
 
   async function requireAdmin(fn) {
     const now = Date.now();
@@ -123,15 +134,49 @@ export default function LeaguePage() {
     return fn();
   }
 
-  function go() {
+  // ✅ FIXED: Go checks Firestore existence BEFORE navigating
+  async function go() {
     const id = (leagueId || "").trim();
-    if (!id) return;
-    navigate(`/league/${encodeURIComponent(id)}`);
-  }
 
-  function isValidLeagueId(id) {
-    // simple & safe: letters/numbers/_/-
-    return /^[a-z0-9_-]{2,40}$/i.test(id);
+    setGoMsg("");
+    setGoMsgColor(COLORS.muted);
+
+    if (!id) return;
+
+    if (!isValidLeagueId(id)) {
+      setGoMsgColor(COLORS.red);
+      setGoMsg(
+        "Invalid league id. Use 2–40 characters: letters, numbers, hyphen (-), underscore (_)."
+      );
+      return;
+    }
+
+    try {
+      setGoBusy(true);
+      setGoMsgColor(COLORS.muted);
+      setGoMsg("Checking league…");
+
+      await ensureAnonAuth();
+
+      const leagueRef = doc(db, "leagues", id);
+      const snap = await getDoc(leagueRef);
+
+      if (!snap.exists()) {
+        setGoMsgColor(COLORS.red);
+        setGoMsg("League not found.");
+        return; // 🔴 do NOT navigate
+      }
+
+      setGoMsgColor(COLORS.green);
+      setGoMsg("✅ League found. Opening…");
+
+      navigate(`/league/${encodeURIComponent(id)}`);
+    } catch (err) {
+      setGoMsgColor(COLORS.red);
+      setGoMsg(`❌ Error checking league: ${err?.message || String(err)}`);
+    } finally {
+      setGoBusy(false);
+    }
   }
 
   async function createLeague() {
@@ -177,8 +222,7 @@ export default function LeaguePage() {
             leagueId: id,
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            // Optional: a displayName field if you ever want it later
-            // displayName: id,
+            // Optional: displayName: id,
           },
           { merge: true }
         );
@@ -219,9 +263,15 @@ export default function LeaguePage() {
                   }}
                 />
 
-                <button style={goBtn} onClick={go}>
-                  Go
+                <button style={goBtn} onClick={go} disabled={goBusy}>
+                  {goBusy ? "Checking..." : "Go"}
                 </button>
+
+                {!!goMsg && (
+                  <div style={{ fontWeight: 900, color: goMsgColor }}>
+                    {goMsg}
+                  </div>
+                )}
               </div>
             </div>
           </div>
