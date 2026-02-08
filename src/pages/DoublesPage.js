@@ -931,14 +931,14 @@ export default function DoublesPage() {
         ],
       };
 
-      newCards = cards.map((c) => {
+      const newCards2 = cards.map((c) => {
         if (c.id !== targetId) return c;
         return { ...c, teams: [...(c.teams || []), caliTeam] };
       });
 
       await updateDoc(leagueRef, {
         "doubles.checkins": newCheckins,
-        "doubles.cards": newCards,
+        "doubles.cards": newCards2,
         "doubles.updatedAt": Date.now(),
       });
 
@@ -1137,6 +1137,73 @@ export default function DoublesPage() {
     textAlign: "center",
   };
 
+  // --- Putting-style switch rows (for Doubles format selectors) ---
+  const switchRowStyle = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: 12,
+    borderRadius: 14,
+    border: `1px solid ${COLORS.border}`,
+    background: COLORS.soft,
+    cursor: "pointer",
+    userSelect: "none",
+  };
+
+  const switchPill = (on) => ({
+    width: 56,
+    height: 30,
+    borderRadius: 999,
+    border: `2px solid ${COLORS.navy}`,
+    background: on ? COLORS.orange : "#fff",
+    position: "relative",
+    flexShrink: 0,
+    transition: "background 120ms ease",
+  });
+
+  const switchKnob = (on) => ({
+    width: 22,
+    height: 22,
+    borderRadius: 999,
+    background: on ? "#fff" : COLORS.navy,
+    position: "absolute",
+    top: 2,
+    left: on ? 30 : 2,
+    transition: "left 120ms ease, background 120ms ease",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+  });
+
+  function SwitchRow({ label, sub, checked, onClick }) {
+    return (
+      <div
+        style={switchRowStyle}
+        onClick={onClick}
+        role="switch"
+        aria-checked={checked}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+          }
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 1000, color: COLORS.navy }}>{label}</div>
+          {sub ? (
+            <div style={{ fontSize: 12, color: COLORS.muted, fontWeight: 900 }}>
+              {sub}
+            </div>
+          ) : null}
+        </div>
+        <div style={switchPill(checked)} aria-hidden="true">
+          <div style={switchKnob(checked)} />
+        </div>
+      </div>
+    );
+  }
+
   if (!safeLeagueId) {
     return (
       <div style={pageWrap}>
@@ -1170,7 +1237,6 @@ export default function DoublesPage() {
         <div style={container}>
           <Header />
 
-          {/* League name + Back to League */}
           <div style={leagueRowStyle}>
             League: <b>{leagueDisplayName || safeLeagueId}</b>{" "}
             <span style={{ opacity: 0.6 }}>•</span>{" "}
@@ -1203,7 +1269,6 @@ export default function DoublesPage() {
       <div style={container}>
         <Header />
 
-        {/* ✅ League name + Back to League (matches the other page) */}
         <div style={leagueRowStyle}>
           League: <b>{leagueDisplayName || safeLeagueId}</b>{" "}
           <span style={{ opacity: 0.6 }}>•</span>{" "}
@@ -1253,7 +1318,7 @@ export default function DoublesPage() {
                   {payoutsAreEnabled ? (
                     <>
                       {payoutSummary}
-                      {hasPostedPayouts ? (
+                      {Object.keys(payoutsPosted || {}).length > 0 ? (
                         <span
                           style={{
                             marginLeft: 8,
@@ -1616,7 +1681,8 @@ export default function DoublesPage() {
                   const place = tiePlaces[e.teamId] || 1;
 
                   const payoutCents =
-                    payoutsAreEnabled && hasPostedPayouts
+                    payoutsAreEnabled &&
+                    Object.keys(payoutsPosted || {}).length > 0
                       ? Number(payoutsPosted?.[e.teamId] ?? 0) || 0
                       : 0;
 
@@ -1659,7 +1725,8 @@ export default function DoublesPage() {
                             flexShrink: 0,
                           }}
                           title={
-                            payoutsAreEnabled && hasPostedPayouts
+                            payoutsAreEnabled &&
+                            Object.keys(payoutsPosted || {}).length > 0
                               ? isPaid
                                 ? "Paid out"
                                 : "Not paid"
@@ -1701,7 +1768,8 @@ export default function DoublesPage() {
                             }}
                           >
                             {e.teamName || "Team"}
-                            {payoutsAreEnabled && hasPostedPayouts ? (
+                            {payoutsAreEnabled &&
+                            Object.keys(payoutsPosted || {}).length > 0 ? (
                               <span
                                 style={{
                                   marginLeft: 8,
@@ -1757,75 +1825,51 @@ export default function DoublesPage() {
                 </div>
 
                 <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button
-                      style={{
-                        padding: "12px 14px",
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background:
-                          formatChoice === "seated" ? COLORS.orange : "#fff",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                        flex: 1,
-                        minWidth: 220,
-                      }}
-                      onClick={() => setFormatChoice("seated")}
-                    >
-                      Seated Doubles (A/B)
-                    </button>
-                    <button
-                      style={{
-                        padding: "12px 14px",
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background:
-                          formatChoice === "random" ? COLORS.orange : "#fff",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                        flex: 1,
-                        minWidth: 220,
-                      }}
-                      onClick={() => setFormatChoice("random")}
-                    >
-                      Random Doubles
-                    </button>
+                  {/* ✅ Putting-style switches */}
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 1000,
+                      color: COLORS.navy,
+                    }}
+                  >
+                    Doubles Format
                   </div>
+                  <SwitchRow
+                    label="Seated Doubles (A/B)"
+                    sub="Check-in assigns Pool A or Pool B."
+                    checked={formatChoice === "seated"}
+                    onClick={() => setFormatChoice("seated")}
+                  />
+                  <SwitchRow
+                    label="Random Doubles"
+                    sub="All players are randomly paired."
+                    checked={formatChoice === "random"}
+                    onClick={() => setFormatChoice("random")}
+                  />
 
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button
-                      style={{
-                        padding: "12px 14px",
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background:
-                          caliMode === "random" ? COLORS.orange : "#fff",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                        flex: 1,
-                        minWidth: 220,
-                      }}
-                      onClick={() => setCaliMode("random")}
-                    >
-                      Cali: Random (if odd)
-                    </button>
-                    <button
-                      style={{
-                        padding: "12px 14px",
-                        borderRadius: 12,
-                        border: `2px solid ${COLORS.navy}`,
-                        background:
-                          caliMode === "manual" ? COLORS.orange : "#fff",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                        flex: 1,
-                        minWidth: 220,
-                      }}
-                      onClick={() => setCaliMode("manual")}
-                    >
-                      Cali: Admin selects (if odd)
-                    </button>
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontSize: 12,
+                      fontWeight: 1000,
+                      color: COLORS.navy,
+                    }}
+                  >
+                    Cali Selection (only if odd #)
                   </div>
+                  <SwitchRow
+                    label="Cali: Random"
+                    sub="Randomly selects the Cali player when needed."
+                    checked={caliMode === "random"}
+                    onClick={() => setCaliMode("random")}
+                  />
+                  <SwitchRow
+                    label="Cali: Admin selects"
+                    sub="Admin can choose the Cali player."
+                    checked={caliMode === "manual"}
+                    onClick={() => setCaliMode("manual")}
+                  />
 
                   {caliMode === "manual" && (
                     <select
@@ -1857,11 +1901,6 @@ export default function DoublesPage() {
               </div>
 
               {/* Payouts (unchanged) */}
-              {/* ...everything below stays exactly as you already had it... */}
-
-              {/* (Keeping your existing Admin/Payout/Late Player/Edit Holes/Erase sections unchanged) */}
-
-              {/* Payouts */}
               <div style={{ ...cardStyle, padding: 12 }}>
                 <div style={{ fontWeight: 1000, color: COLORS.navy }}>
                   Payouts (Teams)
@@ -1928,7 +1967,7 @@ export default function DoublesPage() {
                         <span style={{ color: COLORS.navy }}>
                           {payoutSummary}
                         </span>
-                        {hasPostedPayouts ? (
+                        {Object.keys(payoutsPosted || {}).length > 0 ? (
                           <span
                             style={{
                               marginLeft: 8,
@@ -2068,7 +2107,7 @@ export default function DoublesPage() {
                         Post Payouts to Leaderboard (Admin)
                       </button>
 
-                      {hasPostedPayouts && (
+                      {Object.keys(payoutsPosted || {}).length > 0 && (
                         <button
                           style={{
                             padding: "12px 14px",
