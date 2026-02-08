@@ -1,11 +1,18 @@
-// src/pages/LeaguePage.js
 import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
-const ADMIN_PASSWORD = "Pescado!admin";
+const ADMIN_PASSWORD = "Pescado!";
+
+const ADMIN_PROMPT_TEXT = `Admin Password Required to Register New Leagues
+
+Contact Eli Morgan for questions and next steps.
+
+Eli Morgan
+eliwmorgan@gmail.com
+845-376-0241`;
 
 export default function LeaguePage() {
   const navigate = useNavigate();
@@ -112,26 +119,13 @@ export default function LeaguePage() {
     color: COLORS.navy,
   };
 
-  const helperNote = {
-    marginTop: 10,
-    fontSize: 12,
-    color: COLORS.muted,
-    textAlign: "center",
-    fontWeight: 900,
-  };
-
-  const devContactBlock = `Need help? Contact the Developer for assistance:
-Eli Morgan
-eliwmorgan@gmail.com
-8453760241`;
-
   async function requireAdmin(fn) {
     const now = Date.now();
     if (now < adminOkUntil) return fn();
 
-    const pw = window.prompt(`Admin password:\n\n${devContactBlock}`);
+    const pw = window.prompt(ADMIN_PROMPT_TEXT);
     if (pw !== ADMIN_PASSWORD) {
-      alert("Wrong password.");
+      alert("Incorrect admin password.");
       return;
     }
     setAdminOkUntil(now + 10 * 60 * 1000);
@@ -139,41 +133,29 @@ eliwmorgan@gmail.com
   }
 
   function isValidLeagueId(id) {
-    // simple & safe: letters/numbers/_/-
     return /^[a-z0-9_-]{2,40}$/i.test(id);
   }
 
   async function go() {
     setGoMsg("");
-    setGoMsgColor(COLORS.muted);
-
     const id = (leagueId || "").trim();
     if (!id) return;
 
-    if (!isValidLeagueId(id)) {
-      setGoMsgColor(COLORS.red);
-      setGoMsg(
-        "League id must be 2–40 characters and only use letters, numbers, hyphen (-), or underscore (_)."
-      );
-      return;
-    }
-
     try {
       await ensureAnonAuth();
-
       const leagueRef = doc(db, "leagues", id);
       const snap = await getDoc(leagueRef);
 
       if (!snap.exists()) {
         setGoMsgColor(COLORS.red);
-        setGoMsg("League not found.");
+        setGoMsg("League not found. Please check the ID and try again.");
         return;
       }
 
       navigate(`/league/${encodeURIComponent(id)}`);
     } catch (err) {
       setGoMsgColor(COLORS.red);
-      setGoMsg(`❌ Error: ${err?.message || String(err)}`);
+      setGoMsg("Error checking league. Please try again.");
     }
   }
 
@@ -185,22 +167,21 @@ eliwmorgan@gmail.com
 
     if (!id) {
       setCreateMsgColor(COLORS.red);
-      setCreateMsg("Please enter a new league id.");
+      setCreateMsg("Please enter a new league ID.");
       return;
     }
+
     if (!isValidLeagueId(id)) {
       setCreateMsgColor(COLORS.red);
       setCreateMsg(
-        "League id must be 2–40 characters and only use letters, numbers, hyphen (-), or underscore (_)."
+        "League ID must be 2–40 characters and only use letters, numbers, hyphen (-), or underscore (_)."
       );
       return;
     }
 
     await requireAdmin(async () => {
       try {
-        setCreateMsgColor(COLORS.muted);
         setCreateMsg("Creating league…");
-
         await ensureAnonAuth();
 
         const leagueRef = doc(db, "leagues", id);
@@ -208,19 +189,15 @@ eliwmorgan@gmail.com
 
         if (snap.exists()) {
           setCreateMsgColor(COLORS.red);
-          setCreateMsg("That league id already exists.");
+          setCreateMsg("That league ID already exists.");
           return;
         }
 
-        await setDoc(
-          leagueRef,
-          {
-            leagueId: id,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          },
-          { merge: true }
-        );
+        await setDoc(leagueRef, {
+          leagueId: id,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
 
         setCreateMsgColor(COLORS.green);
         setCreateMsg("✅ League created. Opening it now…");
@@ -247,15 +224,13 @@ eliwmorgan@gmail.com
             <div style={labelTitle}>Go to league by ID</div>
 
             <div style={innerPanel}>
-              <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+              <div style={{ display: "grid", gap: 12 }}>
                 <input
                   style={input}
                   placeholder="Enter league id..."
                   value={leagueId}
                   onChange={(e) => setLeagueId(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") go();
-                  }}
+                  onKeyDown={(e) => e.key === "Enter" && go()}
                 />
 
                 <button style={goBtn} onClick={go}>
@@ -268,9 +243,8 @@ eliwmorgan@gmail.com
                   </div>
                 )}
 
-                <div style={helperNote}>
-                  Note: League IDs are{" "}
-                  <span style={{ color: COLORS.navy }}>case sensitive</span>.
+                <div style={{ fontSize: 12, color: COLORS.muted }}>
+                  League IDs are <b>case sensitive</b>.
                 </div>
               </div>
             </div>
@@ -281,15 +255,13 @@ eliwmorgan@gmail.com
             <div style={labelTitle}>Create New League (Admin)</div>
 
             <div style={innerPanel}>
-              <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+              <div style={{ display: "grid", gap: 12 }}>
                 <input
                   style={input}
                   placeholder="New league id (ex: pescado, winter-2026)"
                   value={newLeagueId}
                   onChange={(e) => setNewLeagueId(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") createLeague();
-                  }}
+                  onKeyDown={(e) => e.key === "Enter" && createLeague()}
                 />
 
                 <button style={createBtn} onClick={createLeague}>
@@ -301,19 +273,13 @@ eliwmorgan@gmail.com
                     {createMsg}
                   </div>
                 )}
-
-                <div style={helperNote}>
-                  Note: League IDs are{" "}
-                  <span style={{ color: COLORS.navy }}>case sensitive</span>.
-                </div>
               </div>
             </div>
           </div>
 
-          {/* Footer */}
           <div
             style={{
-              marginTop: 16,
+              marginTop: 18,
               fontSize: 12,
               opacity: 0.7,
               textAlign: "center",
