@@ -5,7 +5,7 @@ import Header from "../components/Header";
 import { db, ensureAnonAuth } from "../firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
-const ADMIN_PASSWORD = "Pescado!";
+const ADMIN_PASSWORD = "Pescado!admin";
 
 export default function LeaguePage() {
   const navigate = useNavigate();
@@ -13,11 +13,8 @@ export default function LeaguePage() {
   const APP_FOOTER = "Developed by Eli Morgan";
 
   const [leagueId, setLeagueId] = useState("");
-
-  // Go-to-league messaging
   const [goMsg, setGoMsg] = useState("");
   const [goMsgColor, setGoMsgColor] = useState("rgba(0,0,0,0.65)");
-  const [goBusy, setGoBusy] = useState(false);
 
   // Create league (admin)
   const [newLeagueId, setNewLeagueId] = useState("");
@@ -107,7 +104,6 @@ export default function LeaguePage() {
     ...btnBase,
     background: COLORS.navy,
     color: "white",
-    opacity: goBusy ? 0.7 : 1,
   };
 
   const createBtn = {
@@ -116,16 +112,24 @@ export default function LeaguePage() {
     color: COLORS.navy,
   };
 
-  function isValidLeagueId(id) {
-    // simple & safe: letters/numbers/_/-
-    return /^[a-z0-9_-]{2,40}$/i.test(id);
-  }
+  const helperNote = {
+    marginTop: 10,
+    fontSize: 12,
+    color: COLORS.muted,
+    textAlign: "center",
+    fontWeight: 900,
+  };
+
+  const devContactBlock = `Need help? Contact the Developer for assistance:
+Eli Morgan
+eliwmorgan@gmail.com
+8453760241`;
 
   async function requireAdmin(fn) {
     const now = Date.now();
     if (now < adminOkUntil) return fn();
 
-    const pw = window.prompt("Admin password:");
+    const pw = window.prompt(`Admin password:\n\n${devContactBlock}`);
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
       return;
@@ -134,28 +138,27 @@ export default function LeaguePage() {
     return fn();
   }
 
-  // ✅ FIXED: Go checks Firestore existence BEFORE navigating
-  async function go() {
-    const id = (leagueId || "").trim();
+  function isValidLeagueId(id) {
+    // simple & safe: letters/numbers/_/-
+    return /^[a-z0-9_-]{2,40}$/i.test(id);
+  }
 
+  async function go() {
     setGoMsg("");
     setGoMsgColor(COLORS.muted);
 
+    const id = (leagueId || "").trim();
     if (!id) return;
 
     if (!isValidLeagueId(id)) {
       setGoMsgColor(COLORS.red);
       setGoMsg(
-        "Invalid league id. Use 2–40 characters: letters, numbers, hyphen (-), underscore (_)."
+        "League id must be 2–40 characters and only use letters, numbers, hyphen (-), or underscore (_)."
       );
       return;
     }
 
     try {
-      setGoBusy(true);
-      setGoMsgColor(COLORS.muted);
-      setGoMsg("Checking league…");
-
       await ensureAnonAuth();
 
       const leagueRef = doc(db, "leagues", id);
@@ -164,18 +167,13 @@ export default function LeaguePage() {
       if (!snap.exists()) {
         setGoMsgColor(COLORS.red);
         setGoMsg("League not found.");
-        return; // 🔴 do NOT navigate
+        return;
       }
-
-      setGoMsgColor(COLORS.green);
-      setGoMsg("✅ League found. Opening…");
 
       navigate(`/league/${encodeURIComponent(id)}`);
     } catch (err) {
       setGoMsgColor(COLORS.red);
-      setGoMsg(`❌ Error checking league: ${err?.message || String(err)}`);
-    } finally {
-      setGoBusy(false);
+      setGoMsg(`❌ Error: ${err?.message || String(err)}`);
     }
   }
 
@@ -183,8 +181,7 @@ export default function LeaguePage() {
     setCreateMsg("");
     setCreateMsgColor(COLORS.muted);
 
-    const idRaw = (newLeagueId || "").trim();
-    const id = idRaw;
+    const id = (newLeagueId || "").trim();
 
     if (!id) {
       setCreateMsgColor(COLORS.red);
@@ -215,14 +212,12 @@ export default function LeaguePage() {
           return;
         }
 
-        // Create the league doc. Pages auto-work because they load by leagueId.
         await setDoc(
           leagueRef,
           {
             leagueId: id,
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            // Optional: displayName: id,
           },
           { merge: true }
         );
@@ -263,8 +258,8 @@ export default function LeaguePage() {
                   }}
                 />
 
-                <button style={goBtn} onClick={go} disabled={goBusy}>
-                  {goBusy ? "Checking..." : "Go"}
+                <button style={goBtn} onClick={go}>
+                  Go
                 </button>
 
                 {!!goMsg && (
@@ -272,6 +267,11 @@ export default function LeaguePage() {
                     {goMsg}
                   </div>
                 )}
+
+                <div style={helperNote}>
+                  Note: League IDs are{" "}
+                  <span style={{ color: COLORS.navy }}>case sensitive</span>.
+                </div>
               </div>
             </div>
           </div>
@@ -301,12 +301,13 @@ export default function LeaguePage() {
                     {createMsg}
                   </div>
                 )}
+
+                <div style={helperNote}>
+                  Note: League IDs are{" "}
+                  <span style={{ color: COLORS.navy }}>case sensitive</span>.
+                </div>
               </div>
             </div>
-          </div>
-
-          <div style={{ marginTop: 16, fontSize: 12, opacity: 0.6 }}>
-            (League IDs are not listed here by design.)
           </div>
 
           {/* Footer */}
