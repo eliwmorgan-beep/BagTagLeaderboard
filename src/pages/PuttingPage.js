@@ -13,7 +13,7 @@ import {
 } from "firebase/firestore";
 
 const ADMIN_PASSWORD = "Pescado!";
-const APP_VERSION = "v1.8.1";
+const APP_VERSION = "v1.8.2";
 
 // ✅ defaults now start at 0, and payouts can be enabled/disabled
 const DEFAULT_PAYOUT_CONFIG = {
@@ -80,12 +80,14 @@ function computeCardSizesNoOnes(n) {
     for (const s of sizes) {
       const ns = sum + s;
       if (ns > n) continue;
+
       const prev = best[sum];
       const nextCombo = [...prev.combo, s];
       const num2 = prev.score[0] + (s === 2 ? 1 : 0);
       const num4 = prev.score[1] + (s === 4 ? 1 : 0);
       const len = prev.score[2] + 1;
       const nextScore = [num2, num4, len];
+
       if (!best[ns] || betterScore(nextScore, best[ns].score)) {
         best[ns] = { combo: nextCombo, score: nextScore };
       }
@@ -107,6 +109,7 @@ function clampInt(n, min, max) {
   if (Number.isNaN(x)) return min;
   return Math.max(min, Math.min(max, Math.floor(x)));
 }
+
 function payoutPlacesForPoolSize(count) {
   if (count > 7) return 3;
   if (count >= 5) return 2;
@@ -114,19 +117,23 @@ function payoutPlacesForPoolSize(count) {
   if (count === 1) return 1;
   return 0;
 }
+
 function sharesByPoolMode(nPlaces) {
   if (nPlaces >= 3) return [0.5, 0.3, 0.2];
   if (nPlaces === 2) return [0.6, 0.4];
   if (nPlaces === 1) return [1.0];
   return [];
 }
+
 // Collective weights, ordered by priority: A1, A2, A3, B1, B2, C1
 const COLLECTIVE_BASE_WEIGHTS = [30, 20, 15, 14, 11, 10]; // sums 100
+
 function scaleWeightsToFractions(weights) {
   const sum = weights.reduce((a, b) => a + b, 0);
   if (!sum) return [];
   return weights.map((w) => w / sum);
 }
+
 // Allocate INTEGER dollars across positions so total == potDollars
 function allocatePositionAmountsDollars(potDollars, shares) {
   const n = shares.length;
@@ -160,6 +167,7 @@ function allocatePositionAmountsDollars(potDollars, shares) {
   }
   return amounts;
 }
+
 // Tie-aware payout calculator for a single pool
 function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
   const nPositions = positionAmounts.length;
@@ -180,6 +188,7 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     const groupSize = g.members.length;
     const start = pos;
     const end = pos + groupSize - 1;
+
     if (start > nPositions) break;
 
     const coveredStart = Math.max(start, 1);
@@ -193,6 +202,7 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     if (groupDollars > 0) {
       const perMember = Math.floor(groupDollars / groupSize);
       let rem = groupDollars - perMember * groupSize;
+
       g.members.forEach((m) => {
         payouts[m.id] = (payouts[m.id] || 0) + perMember + (rem > 0 ? 1 : 0);
         if (rem > 0) rem -= 1;
@@ -202,13 +212,16 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     pos += groupSize;
     if (pos > nPositions) break;
   }
+
   return payouts;
 }
+
 // competition ranking ranks with ties: 1,2,2,5...
 function computeTiedRanks(rowsSorted) {
   const ranks = [];
   let prevTotal = null;
   let prevRank = 1;
+
   rowsSorted.forEach((r, idx) => {
     if (idx === 0) {
       ranks.push(1);
@@ -224,6 +237,7 @@ function computeTiedRanks(rowsSorted) {
       prevTotal = r.total;
     }
   });
+
   return ranks;
 }
 
@@ -261,10 +275,7 @@ export default function PuttingPage() {
     cursor: "pointer",
   };
 
-  const smallButtonStyle = {
-    ...buttonStyle,
-    padding: "8px 12px",
-  };
+  const smallButtonStyle = { ...buttonStyle, padding: "8px 12px" };
 
   // ✅ Firestore ref is now based on selected league (URL param)
   const leagueRef = useMemo(() => {
@@ -279,32 +290,25 @@ export default function PuttingPage() {
       poolMode: "split", // split | combined
       stations: 1,
       rounds: 1,
-
       // simultaneous:
       locked: false,
       currentRound: 0,
       finalized: false,
       cardMode: "", // "" | "manual" | "random"
-
       // sequential:
       formatLocked: false, // "Lock Format and Open Check-In"
       checkinLocked: false, // "Lock Check-In"
     },
-
     players: [],
-
     // simultaneous structures:
     cardsByRound: {},
     scores: {},
     submitted: {},
-
     // sequential structures:
     seqCards: [], // [{id,name,playerIds}]
     seqRoundScores: {}, // { round: { cardId: { playerId: number(0..50) } } }
     seqSubmitted: {}, // { round: { cardId: true } }
-
     adjustments: {},
-
     payoutConfig: { ...DEFAULT_PAYOUT_CONFIG },
     payoutsPosted: {},
   });
@@ -332,36 +336,18 @@ export default function PuttingPage() {
   const [seqSelected, setSeqSelected] = useState([]);
   const [seqCardName, setSeqCardName] = useState("");
 
+  // ✅ Sequential: expand ONE card at a time inside "Cards Formed"
+  const [expandedSeqCardId, setExpandedSeqCardId] = useState("");
+  function toggleSeqCard(cardId) {
+    setExpandedSeqCardId((prev) => (prev === cardId ? "" : cardId));
+  }
+
   // Scorekeeper selection UI (simultaneous)
   const [activeCardId, setActiveCardId] = useState("");
   const [openStations, setOpenStations] = useState({});
 
   // ✅ Admin unlock window (device/tab specific)
   const [adminOkUntil, setAdminOkUntil] = useState(0);
-
-  // ✅ NEW: per-card expand/collapse within the Cards section
-  // Keep a map of expanded state by cardId (works for both simultaneous + sequential)
-  const [expandedCardsMap, setExpandedCardsMap] = useState({});
-
-  function isCardExpanded(cardId) {
-    return !!expandedCardsMap?.[cardId];
-  }
-  function toggleCardExpanded(cardId) {
-    setExpandedCardsMap((prev) => ({
-      ...(prev || {}),
-      [cardId]: !prev?.[cardId],
-    }));
-  }
-  function collapseAllCards(cardIds) {
-    const next = {};
-    (cardIds || []).forEach((id) => (next[id] = false));
-    setExpandedCardsMap((prev) => ({ ...(prev || {}), ...next }));
-  }
-  function expandOnlyCard(targetId, cardIds) {
-    const next = {};
-    (cardIds || []).forEach((id) => (next[id] = id === targetId));
-    setExpandedCardsMap((prev) => ({ ...(prev || {}), ...next }));
-  }
 
   // -------- Helpers (computed) --------
   const settings = putting.settings || {};
@@ -395,7 +381,6 @@ export default function PuttingPage() {
   // sequential
   const formatLocked = !!settings.formatLocked;
   const checkinLocked = !!settings.checkinLocked;
-
   const seqCards = Array.isArray(putting.seqCards) ? putting.seqCards : [];
   const seqRoundScores =
     putting.seqRoundScores && typeof putting.seqRoundScores === "object"
@@ -410,6 +395,7 @@ export default function PuttingPage() {
     putting.payoutConfig && typeof putting.payoutConfig === "object"
       ? { ...DEFAULT_PAYOUT_CONFIG, ...putting.payoutConfig }
       : { ...DEFAULT_PAYOUT_CONFIG };
+
   const payoutsEnabled = !!payoutConfig.enabled;
   const payoutsPosted =
     putting.payoutsPosted && typeof putting.payoutsPosted === "object"
@@ -671,6 +657,7 @@ export default function PuttingPage() {
     }
     const allIds = new Set(normalizedPlayers.map((p) => p.id));
     const seen = new Set();
+
     for (const c of cards) {
       const ids = Array.isArray(c.playerIds) ? c.playerIds : [];
       if (ids.length > 4)
@@ -693,6 +680,7 @@ export default function PuttingPage() {
         seen.add(pid);
       }
     }
+
     if (seen.size !== allIds.size) {
       return {
         ok: false,
@@ -708,9 +696,11 @@ export default function PuttingPage() {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
+
     const sizes = computeCardSizesNoOnes(arr.length);
     const cards = [];
     let idx = 0;
+
     sizes.forEach((sz) => {
       const chunk = arr.slice(idx, idx + sz);
       idx += sz;
@@ -720,6 +710,7 @@ export default function PuttingPage() {
         playerIds: chunk.map((p) => p.id),
       });
     });
+
     return cards;
   }
 
@@ -731,6 +722,7 @@ export default function PuttingPage() {
     const sizes = computeCardSizesNoOnes(ranked.length);
     const cards = [];
     let idx = 0;
+
     sizes.forEach((sz) => {
       const chunk = ranked.slice(idx, idx + sz);
       idx += sz;
@@ -740,11 +732,11 @@ export default function PuttingPage() {
         playerIds: chunk.map((x) => x.id),
       });
     });
+
     return cards;
   }
 
   /* =========================== ADMIN ACTIONS =========================== */
-  // Add player (works for both modes; sequential respects checkin lock)
   async function addPlayer() {
     if (finalized) {
       alert("Scores are finalized. Reset to start a new league.");
@@ -790,15 +782,14 @@ export default function PuttingPage() {
     setPool("A");
   }
 
-  // Mode toggle
   async function setPlayMode(nextMode) {
     if (finalized) return;
     await requireAdmin(async () => {
-      // If already "in progress" in one mode, warn
       const hasSimData =
         (putting.players?.length || 0) > 0 ||
         Object.keys(putting.cardsByRound || {}).length > 0 ||
         Object.keys(putting.scores || {}).length > 0;
+
       const hasSeqData =
         (putting.players?.length || 0) > 0 ||
         (putting.seqCards?.length || 0) > 0 ||
@@ -815,12 +806,14 @@ export default function PuttingPage() {
       }
 
       await updatePutting({
-        settings: { ...settings, playMode: nextMode },
+        settings: {
+          ...settings,
+          playMode: nextMode,
+        },
       });
     });
   }
 
-  // Pool mode toggle (disallow changing after players exist)
   async function setPoolMode(next) {
     if (finalized) return;
     await requireAdmin(async () => {
@@ -830,7 +823,12 @@ export default function PuttingPage() {
         );
         return;
       }
-      await updatePutting({ settings: { ...settings, poolMode: next } });
+      await updatePutting({
+        settings: {
+          ...settings,
+          poolMode: next,
+        },
+      });
     });
   }
 
@@ -864,20 +862,16 @@ export default function PuttingPage() {
     setSelectedForCard([]);
     setCardName("");
     setCardsOpen(true);
-
-    // ✅ NEW: default to collapsed names list after randomize
-    collapseAllCards(cards.map((c) => c.id));
   }
 
   async function createCardSimultaneous() {
     if (finalized) return;
-
     if (roundStarted) {
       alert("Round has started. Round 1 cards are locked.");
       return;
     }
     if (cardMode !== "manual") {
-      alert("Choose 'Manually Create Card(s)' first.");
+      alert('Choose "Manually Create Card(s)" first.');
       return;
     }
 
@@ -901,17 +895,11 @@ export default function PuttingPage() {
       playerIds: selectedForCard,
     };
 
-    const nextCards = [...cards, newCard];
-    await updatePuttingDot("cardsByRound.1", nextCards);
-
+    await updatePuttingDot("cardsByRound.1", [...cards, newCard]);
     setSelectedForCard([]);
     setCardName("");
     setName("");
     setPool("A");
-
-    // ✅ NEW: keep list view by default, expand only the new card so it’s easy to find
-    const ids = nextCards.map((c) => c.id);
-    expandOnlyCard(newCard.id, ids);
   }
 
   async function beginRoundOneSimultaneous() {
@@ -947,9 +935,6 @@ export default function PuttingPage() {
       setCardsOpen(true);
       setPayoutsOpen(false);
       window.scrollTo(0, 0);
-
-      // ✅ NEW: collapse to names list when the round starts (easier to find your card)
-      collapseAllCards((cardsByRound?.["1"] || []).map((c) => c.id));
     });
   }
 
@@ -981,15 +966,15 @@ export default function PuttingPage() {
           ...(putting.cardsByRound || {}),
           [String(nextRound)]: autoCards,
         },
-        submitted: { ...(putting.submitted || {}), [String(nextRound)]: {} },
+        submitted: {
+          ...(putting.submitted || {}),
+          [String(nextRound)]: {},
+        },
       });
 
       setActiveCardId("");
       setOpenStations({});
       window.scrollTo(0, 0);
-
-      // ✅ NEW: collapse to names list for the new round
-      collapseAllCards(autoCards.map((c) => c.id));
     });
   }
 
@@ -998,7 +983,6 @@ export default function PuttingPage() {
       return alert("League hasn't started yet.");
     if (currentRound !== totalRounds)
       return alert("Finalize is only available on the final round.");
-
     if (!allCardsSubmittedForRound(currentRound)) {
       const missing = missingCardsForRound(currentRound);
       const names = missing.map((c) => c.name).join(", ");
@@ -1009,7 +993,6 @@ export default function PuttingPage() {
       );
       return;
     }
-
     await updatePutting({ settings: { ...settings, finalized: true } });
     setAdjustOpen(false);
     setPayoutsOpen(false);
@@ -1037,9 +1020,6 @@ export default function PuttingPage() {
       setCheckinOpen(true);
       setCardsOpen(true);
       window.scrollTo(0, 0);
-
-      // ✅ NEW: collapse to names list
-      collapseAllCards(seqCards.map((c) => c.id));
     });
   }
 
@@ -1047,7 +1027,12 @@ export default function PuttingPage() {
     if (finalized) return;
     await requireAdmin(async () => {
       if (!formatLocked) return alert("Format is not locked/open yet.");
-      await updatePutting({ settings: { ...settings, checkinLocked: true } });
+      await updatePutting({
+        settings: {
+          ...settings,
+          checkinLocked: true,
+        },
+      });
     });
   }
 
@@ -1094,17 +1079,58 @@ export default function PuttingPage() {
       playerIds: [...seqSelected],
     };
 
-    const nextSeqCards = [...seqCards, newCard];
-    await updatePutting({ seqCards: nextSeqCards });
-
+    await updatePutting({ seqCards: [...seqCards, newCard] });
     setSeqSelected([]);
     setSeqCardName("");
+  }
 
-    // ✅ NEW: expand only the new card so it’s easy to find right away
-    expandOnlyCard(
-      newCard.id,
-      nextSeqCards.map((c) => c.id)
-    );
+  // ✅ NEW: Randomize sequential cards (only allowed AFTER admin locks check-in)
+  async function randomizeSequentialCards() {
+    if (finalized) return;
+
+    if (!formatLocked) {
+      alert("Admin must click Lock Format and Open Check-In first.");
+      return;
+    }
+
+    if (!checkinLocked) {
+      alert("Randomize Cards is only available after check-in is locked.");
+      return;
+    }
+
+    if (normalizedPlayers.length < 2) {
+      alert("Check in at least 2 players first.");
+      return;
+    }
+
+    await requireAdmin(async () => {
+      // shuffle all players
+      const arr = [...normalizedPlayers];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+
+      const sizes = computeCardSizesNoOnes(arr.length);
+      const cards = [];
+      let idx = 0;
+
+      sizes.forEach((sz) => {
+        const chunk = arr.slice(idx, idx + sz);
+        idx += sz;
+        cards.push({
+          id: uid(),
+          name: `Card ${cards.length + 1}`,
+          playerIds: chunk.map((p) => p.id),
+        });
+      });
+
+      await updatePutting({ seqCards: cards });
+      setSeqSelected([]);
+      setSeqCardName("");
+      setExpandedSeqCardId(""); // keep collapsed after randomize
+      alert("Sequential cards randomized ✅");
+    });
   }
 
   function seqCardRoundTotalsForPlayer(playerId) {
@@ -1181,7 +1207,9 @@ export default function PuttingPage() {
         "Finalize Leaderboard?\n\nThis locks all scores and prevents any more submissions."
       );
       if (!ok) return;
-      await updatePutting({ settings: { ...settings, finalized: true } });
+      await updatePutting({
+        settings: { ...settings, finalized: true },
+      });
       alert("Finalized ✅");
     });
   }
@@ -1227,6 +1255,7 @@ export default function PuttingPage() {
       setCardName("");
       setSeqSelected([]);
       setSeqCardName("");
+      setExpandedSeqCardId("");
       setName("");
       setPool("A");
       setSetupOpen(false);
@@ -1235,9 +1264,6 @@ export default function PuttingPage() {
       setLeaderboardsOpen(false);
       setAdjustOpen(false);
       setPayoutsOpen(false);
-
-      // ✅ reset card expand state
-      setExpandedCardsMap({});
     });
   }
 
@@ -1297,7 +1323,6 @@ export default function PuttingPage() {
       await updateDoc(leagueRef, { [path]: deleteField() });
       return;
     }
-
     const val = clampMade(made);
     await updateDoc(leagueRef, { [path]: val });
   }
@@ -1305,6 +1330,7 @@ export default function PuttingPage() {
   function isCardFullyFilled(roundNum, card) {
     const ids = card?.playerIds || [];
     if (!ids.length) return false;
+
     for (let s = 1; s <= stations; s++) {
       for (const pid of ids) {
         if (!rawMadeExists(roundNum, s, pid)) return false;
@@ -1346,7 +1372,6 @@ export default function PuttingPage() {
 
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
-
       const payoutDollars = Number(payoutsPosted?.[p.id] ?? 0) || 0;
 
       const row = {
@@ -1359,8 +1384,9 @@ export default function PuttingPage() {
         throughRound: through,
       };
 
-      if (poolMode === "combined") pools.A.push(row);
-      else {
+      if (poolMode === "combined") {
+        pools.A.push(row);
+      } else {
         if (p.pool === "B") pools.B.push(row);
         else if (p.pool === "C") pools.C.push(row);
         else pools.A.push(row);
@@ -1385,7 +1411,7 @@ export default function PuttingPage() {
     seqSubmitted,
   ]);
 
-  /* =========================== PAYOUTS (kept as-is) =========================== */
+  /* =========================== PAYOUTS =========================== */
   function computeAllPayoutsDollars() {
     if (!payoutConfig) return { ok: false, reason: "No payout configuration." };
     if (!payoutConfig.enabled)
@@ -1401,6 +1427,7 @@ export default function PuttingPage() {
     const totalPotDollars = buyIn * normalizedPlayers.length;
     const feeDollars = Math.round((totalPotDollars * feePct) / 100);
     const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
+
     if (potAfterFeeDollars <= 0)
       return { ok: false, reason: "Pot after fee is $0." };
 
@@ -1445,6 +1472,7 @@ export default function PuttingPage() {
           rows,
           positionAmounts
         );
+
         Object.entries(poolPayouts).forEach(([pid, dollars]) => {
           payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
         });
@@ -1549,6 +1577,7 @@ export default function PuttingPage() {
   async function togglePayoutsEnabled() {
     await requireAdmin(async () => {
       const next = !payoutConfig.enabled;
+
       if (!next) {
         await updatePutting({
           payoutConfig: {
@@ -1648,16 +1677,6 @@ export default function PuttingPage() {
     );
   }
 
-  // Cards list for the Cards section (depends on mode)
-  const cardsForCardsSection =
-    playMode === "sequential"
-      ? seqCards
-      : Array.isArray(cardsByRound[String(currentRound || 1)])
-      ? cardsByRound[String(currentRound || 1)]
-      : [];
-
-  const cardsForCardsSectionIds = (cardsForCardsSection || []).map((c) => c.id);
-
   /* =========================== RENDER =========================== */
   return (
     <div
@@ -1666,7 +1685,6 @@ export default function PuttingPage() {
         background: `linear-gradient(180deg, ${COLORS.blueLight} 0%, #ffffff 60%)`,
         display: "flex",
         justifyContent: "center",
-        // ✅ responsive outer padding (keeps desktop same; gives phones room)
         padding: "clamp(12px, 4vw, 24px)",
       }}
     >
@@ -1676,7 +1694,6 @@ export default function PuttingPage() {
             textAlign: "center",
             background: COLORS.panel,
             borderRadius: 18,
-            // ✅ responsive panel padding (keeps desktop same; gives phones room)
             padding: "clamp(14px, 4vw, 26px)",
             border: `2px solid ${COLORS.navy}`,
             boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
@@ -1802,7 +1819,7 @@ export default function PuttingPage() {
             {setupOpen && (
               <div style={{ marginTop: 10 }}>
                 <div style={{ display: "grid", gap: 10 }}>
-                  {/* ✅ Format selector */}
+                  {/* Format selector */}
                   <div>
                     <div
                       style={{
@@ -1832,7 +1849,7 @@ export default function PuttingPage() {
                     </select>
                   </div>
 
-                  {/* ✅ Pool selector */}
+                  {/* Pool selector */}
                   <div>
                     <div
                       style={{
@@ -1862,7 +1879,7 @@ export default function PuttingPage() {
                     </select>
                   </div>
 
-                  {/* ✅ Dynamic explanations */}
+                  {/* Explanations */}
                   <div style={{ fontSize: 12, opacity: 0.8, lineHeight: 1.35 }}>
                     <div
                       style={{
@@ -1877,6 +1894,7 @@ export default function PuttingPage() {
                     <div>{poolDesc}</div>
                   </div>
 
+                  {/* Stations / Rounds */}
                   <div style={{ display: "grid", gap: 10 }}>
                     <div>
                       <div
@@ -1980,7 +1998,7 @@ export default function PuttingPage() {
                       </button>
                     )}
 
-                    {/* Sequential control */}
+                    {/* Sequential controls */}
                     {playMode === "sequential" && !formatLocked && (
                       <button
                         onClick={lockFormatAndOpenCheckin}
@@ -2642,6 +2660,7 @@ export default function PuttingPage() {
                       </div>
 
                       <div style={{ display: "grid", gap: 10 }}>
+                        {/* ✅ label change */}
                         <button
                           onClick={setCardModeManual}
                           style={{
@@ -2652,7 +2671,6 @@ export default function PuttingPage() {
                             color: COLORS.navy,
                           }}
                         >
-                          {/* ✅ requested rename */}
                           Manually Create Card(s)
                         </button>
 
@@ -2673,7 +2691,6 @@ export default function PuttingPage() {
                           Cards are created using sizes 2–4 only (no 1-player
                           cards).
                         </div>
-
                         <div style={{ fontSize: 12, opacity: 0.75 }}>
                           Current mode:{" "}
                           <strong>
@@ -2715,6 +2732,46 @@ export default function PuttingPage() {
                         Select 2–4 unassigned players, then create a card.
                       </div>
 
+                      {/* ✅ Sequential controls: Manual stays; Randomize only shows AFTER check-in locked */}
+                      <div
+                        style={{ display: "grid", gap: 10, marginBottom: 10 }}
+                      >
+                        <button
+                          onClick={() => {
+                            // just a helper label (no mode switch)
+                            // opens this section already; kept minimal
+                          }}
+                          style={{
+                            ...smallButtonStyle,
+                            background: "#fff",
+                            border: `1px solid ${COLORS.navy}`,
+                            color: COLORS.navy,
+                            fontWeight: 900,
+                          }}
+                          disabled
+                          title="Manual card creation is done below."
+                        >
+                          Manually Create Card(s)
+                        </button>
+
+                        {checkinLocked ? (
+                          <button
+                            onClick={randomizeSequentialCards}
+                            style={{
+                              ...smallButtonStyle,
+                              background: COLORS.navy,
+                              color: "white",
+                              border: `1px solid ${COLORS.navy}`,
+                              fontWeight: 900,
+                            }}
+                            disabled={finalized}
+                            title="Requires admin password."
+                          >
+                            Randomize Cards
+                          </button>
+                        ) : null}
+                      </div>
+
                       <div
                         style={{
                           display: "flex",
@@ -2743,7 +2800,6 @@ export default function PuttingPage() {
                         >
                           Create Card
                         </button>
-
                         <div style={{ fontSize: 12, opacity: 0.75 }}>
                           Selected: <strong>{seqSelected.length}</strong> / 4
                           (min 2)
@@ -2855,408 +2911,7 @@ export default function PuttingPage() {
 
             {cardsOpen && (
               <div style={{ marginTop: 10 }}>
-                {/* ✅ NEW: When section is expanded, show a simple list of card names first, then user can expand just one */}
-                {cardsForCardsSection.length > 0 && (
-                  <div
-                    style={{
-                      border: `1px solid ${COLORS.border}`,
-                      background: "#fff",
-                      borderRadius: 12,
-                      padding: 10,
-                      marginBottom: 10,
-                    }}
-                  >
-                    <div
-                      style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}
-                    >
-                      Tap a card name to expand it.
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <button
-                        onClick={() =>
-                          collapseAllCards(cardsForCardsSectionIds)
-                        }
-                        style={{
-                          ...smallButtonStyle,
-                          background: "#fff",
-                          border: `1px solid ${COLORS.border}`,
-                          fontWeight: 900,
-                        }}
-                      >
-                        Collapse All
-                      </button>
-                    </div>
-
-                    <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                      {cardsForCardsSection.map((c) => {
-                        const expanded = isCardExpanded(c.id);
-                        const modeTag =
-                          playMode === "simultaneous" &&
-                          roundStarted &&
-                          currentRound
-                            ? submitted?.[String(currentRound)]?.[c.id]
-                              ? "✓ submitted"
-                              : "not submitted"
-                            : null;
-
-                        const nextRound =
-                          playMode === "sequential"
-                            ? seqNextRoundForCard(c.id)
-                            : null;
-                        const done =
-                          playMode === "sequential"
-                            ? nextRound === null
-                            : false;
-
-                        return (
-                          <div
-                            key={c.id}
-                            style={{
-                              border: `1px solid ${COLORS.border}`,
-                              borderRadius: 14,
-                              background: COLORS.soft,
-                              overflow: "hidden",
-                            }}
-                          >
-                            <div
-                              onClick={() => toggleCardExpanded(c.id)}
-                              style={{
-                                padding: "12px 12px",
-                                cursor: "pointer",
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                                gap: 10,
-                                background: "#fff",
-                              }}
-                            >
-                              <div
-                                style={{ fontWeight: 900, color: COLORS.navy }}
-                              >
-                                {c.name}
-                                {modeTag ? (
-                                  <span
-                                    style={{
-                                      marginLeft: 8,
-                                      fontSize: 12,
-                                      opacity: 0.75,
-                                    }}
-                                  >
-                                    {modeTag}
-                                  </span>
-                                ) : null}
-                                {playMode === "sequential" ? (
-                                  <span
-                                    style={{
-                                      marginLeft: 8,
-                                      fontSize: 12,
-                                      opacity: 0.75,
-                                    }}
-                                  >
-                                    {done
-                                      ? "✓ completed"
-                                      : `playing (next: Round ${nextRound})`}
-                                  </span>
-                                ) : null}
-                              </div>
-
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: 8,
-                                  alignItems: "center",
-                                }}
-                              >
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    expandOnlyCard(
-                                      c.id,
-                                      cardsForCardsSectionIds
-                                    );
-                                  }}
-                                  style={{
-                                    ...smallButtonStyle,
-                                    background: "#fff",
-                                    border: `1px solid ${COLORS.navy}`,
-                                    color: COLORS.navy,
-                                    fontWeight: 900,
-                                  }}
-                                >
-                                  Only This
-                                </button>
-
-                                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                  {expanded
-                                    ? "Tap to collapse"
-                                    : "Tap to expand"}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Expanded content (only this card) */}
-                            {expanded && (
-                              <div
-                                style={{ padding: 12, background: COLORS.soft }}
-                              >
-                                {/* SIMULTANEOUS expanded card details */}
-                                {playMode === "simultaneous" && (
-                                  <div
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: 12,
-                                      border: `1px solid ${COLORS.border}`,
-                                      background: "#fff",
-                                    }}
-                                  >
-                                    <div style={{ marginTop: 6, fontSize: 14 }}>
-                                      {(c.playerIds || []).map((pid) => {
-                                        const p = normalizedPlayerById[pid];
-                                        if (!p) return null;
-                                        return (
-                                          <div
-                                            key={pid}
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                            }}
-                                          >
-                                            <span style={{ fontWeight: 800 }}>
-                                              {p.name}
-                                            </span>
-                                            {poolMode === "split" ? (
-                                              <span
-                                                style={{
-                                                  fontSize: 12,
-                                                  fontWeight: 900,
-                                                  color: COLORS.navy,
-                                                }}
-                                              >
-                                                {p.pool === "B"
-                                                  ? "B Pool"
-                                                  : p.pool === "C"
-                                                  ? "C Pool"
-                                                  : "A Pool"}
-                                              </span>
-                                            ) : (
-                                              <span
-                                                style={{
-                                                  fontSize: 12,
-                                                  opacity: 0.7,
-                                                }}
-                                              >
-                                                Combined
-                                              </span>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                )}
-
-                                {/* SEQUENTIAL expanded card details + scoring */}
-                                {playMode === "sequential" && (
-                                  <div
-                                    style={{
-                                      border: `1px solid ${COLORS.border}`,
-                                      borderRadius: 14,
-                                      background: "#fff",
-                                      padding: 12,
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        marginTop: 8,
-                                        display: "grid",
-                                        gap: 6,
-                                      }}
-                                    >
-                                      {(c.playerIds || []).map((pid) => {
-                                        const p = normalizedPlayerById[pid];
-                                        if (!p) return null;
-                                        return (
-                                          <div
-                                            key={pid}
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                            }}
-                                          >
-                                            <span style={{ fontWeight: 800 }}>
-                                              {p.name}
-                                            </span>
-                                            {poolMode === "split" ? (
-                                              <span
-                                                style={{
-                                                  fontSize: 12,
-                                                  fontWeight: 900,
-                                                  color: COLORS.navy,
-                                                }}
-                                              >
-                                                {p.pool === "B"
-                                                  ? "B"
-                                                  : p.pool === "C"
-                                                  ? "C"
-                                                  : "A"}{" "}
-                                                Pool
-                                              </span>
-                                            ) : (
-                                              <span
-                                                style={{
-                                                  fontSize: 12,
-                                                  opacity: 0.7,
-                                                }}
-                                              >
-                                                Combined
-                                              </span>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-
-                                    {(() => {
-                                      const nextRound = seqNextRoundForCard(
-                                        c.id
-                                      );
-                                      const done = nextRound === null;
-                                      if (done) return null;
-
-                                      return (
-                                        <div style={{ marginTop: 12 }}>
-                                          <div
-                                            style={{
-                                              fontWeight: 900,
-                                              color: COLORS.navy,
-                                              marginBottom: 6,
-                                            }}
-                                          >
-                                            Round {nextRound} scores (0–50)
-                                          </div>
-
-                                          <div
-                                            style={{ display: "grid", gap: 8 }}
-                                          >
-                                            {(c.playerIds || []).map((pid) => {
-                                              const p =
-                                                normalizedPlayerById[pid];
-                                              if (!p) return null;
-                                              const currentVal =
-                                                seqRoundScores?.[
-                                                  String(nextRound)
-                                                ]?.[c.id]?.[pid];
-
-                                              return (
-                                                <div
-                                                  key={pid}
-                                                  style={{
-                                                    display: "flex",
-                                                    justifyContent:
-                                                      "space-between",
-                                                    alignItems: "center",
-                                                    gap: 10,
-                                                    padding: "10px 12px",
-                                                    borderRadius: 12,
-                                                    border: `1px solid ${COLORS.border}`,
-                                                    background: COLORS.soft,
-                                                  }}
-                                                >
-                                                  <div
-                                                    style={{ fontWeight: 900 }}
-                                                  >
-                                                    {p.name}
-                                                  </div>
-
-                                                  <select
-                                                    value={
-                                                      currentVal ===
-                                                        undefined ||
-                                                      currentVal === null ||
-                                                      currentVal === ""
-                                                        ? ""
-                                                        : String(currentVal)
-                                                    }
-                                                    disabled={finalized}
-                                                    onChange={(e) =>
-                                                      setSeqPlayerRoundScore(
-                                                        nextRound,
-                                                        c.id,
-                                                        pid,
-                                                        e.target.value === ""
-                                                          ? ""
-                                                          : Number(
-                                                              e.target.value
-                                                            )
-                                                      )
-                                                    }
-                                                    style={{
-                                                      ...inputStyle,
-                                                      width: 96,
-                                                      background: "#fff",
-                                                      fontWeight: 900,
-                                                      textAlign: "center",
-                                                    }}
-                                                  >
-                                                    <option value="">—</option>
-                                                    {Array.from(
-                                                      { length: 51 },
-                                                      (_, i) => i
-                                                    ).map((n) => (
-                                                      <option key={n} value={n}>
-                                                        {n}
-                                                      </option>
-                                                    ))}
-                                                  </select>
-                                                </div>
-                                              );
-                                            })}
-                                          </div>
-
-                                          <button
-                                            onClick={() =>
-                                              submitSeqCardRound(
-                                                c.id,
-                                                nextRound
-                                              )
-                                            }
-                                            disabled={finalized}
-                                            style={{
-                                              ...buttonStyle,
-                                              width: "100%",
-                                              marginTop: 10,
-                                              background: COLORS.green,
-                                              color: "white",
-                                              border: `1px solid ${COLORS.green}`,
-                                            }}
-                                          >
-                                            Submit Round {nextRound} Scores
-                                          </button>
-                                        </div>
-                                      );
-                                    })()}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Fallback text when no cards */}
-                {cardsForCardsSection.length === 0 ? (
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>
-                    {playMode === "sequential"
-                      ? "No cards yet. Use the Check-In section to form cards."
-                      : "No cards yet. Create Round 1 cards above."}
-                  </div>
-                ) : null}
-
-                {/* SIMULTANEOUS: manual creation UI (unchanged) */}
+                {/* SIMULTANEOUS cards UI */}
                 {playMode === "simultaneous" && (
                   <>
                     {!roundStarted && cardMode === "manual" ? (
@@ -3322,6 +2977,7 @@ export default function PuttingPage() {
                               const already = r1Cards.some((c) =>
                                 (c.playerIds || []).includes(p.id)
                               );
+
                               return (
                                 <label
                                   key={p.id}
@@ -3402,6 +3058,325 @@ export default function PuttingPage() {
                         all players be assigned to cards before starting.
                       </div>
                     ) : null}
+
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {(Array.isArray(cardsByRound[String(currentRound || 1)])
+                        ? cardsByRound[String(currentRound || 1)]
+                        : []
+                      ).map((c) => (
+                        <div
+                          key={c.id}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            border: `1px solid ${COLORS.border}`,
+                            background: "#fff",
+                          }}
+                        >
+                          <div style={{ fontWeight: 900, color: COLORS.navy }}>
+                            {c.name}{" "}
+                            {roundStarted && currentRound ? (
+                              <span
+                                style={{
+                                  marginLeft: 8,
+                                  fontSize: 12,
+                                  opacity: 0.75,
+                                }}
+                              >
+                                {submitted?.[String(currentRound)]?.[c.id]
+                                  ? "✓ submitted"
+                                  : "not submitted"}
+                              </span>
+                            ) : null}
+                          </div>
+
+                          <div style={{ marginTop: 6, fontSize: 14 }}>
+                            {(c.playerIds || []).map((pid) => {
+                              const p = normalizedPlayerById[pid];
+                              if (!p) return null;
+
+                              return (
+                                <div
+                                  key={pid}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                  }}
+                                >
+                                  <span style={{ fontWeight: 800 }}>
+                                    {p.name}
+                                  </span>
+                                  {poolMode === "split" ? (
+                                    <span
+                                      style={{
+                                        fontSize: 12,
+                                        fontWeight: 900,
+                                        color: COLORS.navy,
+                                      }}
+                                    >
+                                      {p.pool === "B"
+                                        ? "B Pool"
+                                        : p.pool === "C"
+                                        ? "C Pool"
+                                        : "A Pool"}
+                                    </span>
+                                  ) : (
+                                    <span
+                                      style={{ fontSize: 12, opacity: 0.7 }}
+                                    >
+                                      Combined
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {/* SEQUENTIAL cards UI — ✅ per-card expand/collapse */}
+                {playMode === "sequential" && (
+                  <>
+                    {seqCards.length === 0 ? (
+                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                        No cards yet. Use the Check-In section to form cards.
+                      </div>
+                    ) : (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ fontSize: 12, opacity: 0.8 }}>
+                          Tap a card name to expand it.
+                        </div>
+
+                        {seqCards.map((c) => {
+                          const nextRound = seqNextRoundForCard(c.id);
+                          const done = nextRound === null;
+                          const isOpen = expandedSeqCardId === c.id;
+
+                          return (
+                            <div
+                              key={c.id}
+                              style={{
+                                border: `1px solid ${COLORS.border}`,
+                                borderRadius: 14,
+                                background: "#fff",
+                                overflow: "hidden",
+                              }}
+                            >
+                              {/* Card header (always visible) */}
+                              <div
+                                onClick={() => toggleSeqCard(c.id)}
+                                style={{
+                                  padding: "12px 12px",
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  gap: 10,
+                                  cursor: "pointer",
+                                  background: COLORS.soft,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    fontWeight: 900,
+                                    color: COLORS.navy,
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                      display: "inline-block",
+                                      maxWidth: "100%",
+                                      verticalAlign: "bottom",
+                                    }}
+                                  >
+                                    {c.name}
+                                  </span>{" "}
+                                  <span style={{ fontSize: 12, opacity: 0.75 }}>
+                                    {done
+                                      ? "✓ completed"
+                                      : `playing (next: Round ${nextRound})`}
+                                  </span>
+                                </div>
+
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    opacity: 0.75,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {isOpen ? "Tap to collapse" : "Tap to expand"}
+                                </div>
+                              </div>
+
+                              {/* Card body (only when open) */}
+                              {isOpen && (
+                                <div style={{ padding: 12 }}>
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    {(c.playerIds || []).map((pid) => {
+                                      const p = normalizedPlayerById[pid];
+                                      if (!p) return null;
+
+                                      return (
+                                        <div
+                                          key={pid}
+                                          style={{
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            gap: 10,
+                                            padding: "10px 12px",
+                                            borderRadius: 12,
+                                            border: `1px solid ${COLORS.border}`,
+                                            background: COLORS.soft,
+                                          }}
+                                        >
+                                          <span style={{ fontWeight: 900 }}>
+                                            {p.name}
+                                          </span>
+                                          {poolMode === "split" ? (
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                fontWeight: 900,
+                                                color: COLORS.navy,
+                                              }}
+                                            >
+                                              {p.pool === "B"
+                                                ? "B"
+                                                : p.pool === "C"
+                                                ? "C"
+                                                : "A"}{" "}
+                                              Pool
+                                            </span>
+                                          ) : (
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                opacity: 0.7,
+                                              }}
+                                            >
+                                              Combined
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+
+                                  {!done && (
+                                    <div style={{ marginTop: 12 }}>
+                                      <div
+                                        style={{
+                                          fontWeight: 900,
+                                          color: COLORS.navy,
+                                          marginBottom: 6,
+                                        }}
+                                      >
+                                        Round {nextRound} scores (0–50)
+                                      </div>
+
+                                      <div style={{ display: "grid", gap: 8 }}>
+                                        {(c.playerIds || []).map((pid) => {
+                                          const p = normalizedPlayerById[pid];
+                                          if (!p) return null;
+
+                                          const currentVal =
+                                            seqRoundScores?.[
+                                              String(nextRound)
+                                            ]?.[c.id]?.[pid];
+
+                                          return (
+                                            <div
+                                              key={pid}
+                                              style={{
+                                                display: "flex",
+                                                justifyContent: "space-between",
+                                                alignItems: "center",
+                                                gap: 10,
+                                                padding: "10px 12px",
+                                                borderRadius: 12,
+                                                border: `1px solid ${COLORS.border}`,
+                                                background: COLORS.soft,
+                                              }}
+                                            >
+                                              <div style={{ fontWeight: 900 }}>
+                                                {p.name}
+                                              </div>
+
+                                              <select
+                                                value={
+                                                  currentVal === undefined ||
+                                                  currentVal === null ||
+                                                  currentVal === ""
+                                                    ? ""
+                                                    : String(currentVal)
+                                                }
+                                                disabled={finalized}
+                                                onChange={(e) =>
+                                                  setSeqPlayerRoundScore(
+                                                    nextRound,
+                                                    c.id,
+                                                    pid,
+                                                    e.target.value === ""
+                                                      ? ""
+                                                      : Number(e.target.value)
+                                                  )
+                                                }
+                                                style={{
+                                                  ...inputStyle,
+                                                  width: 96,
+                                                  background: "#fff",
+                                                  fontWeight: 900,
+                                                  textAlign: "center",
+                                                }}
+                                              >
+                                                <option value="">—</option>
+                                                {Array.from(
+                                                  { length: 51 },
+                                                  (_, i) => i
+                                                ).map((n) => (
+                                                  <option key={n} value={n}>
+                                                    {n}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+
+                                      <button
+                                        onClick={() =>
+                                          submitSeqCardRound(c.id, nextRound)
+                                        }
+                                        disabled={finalized}
+                                        style={{
+                                          ...buttonStyle,
+                                          width: "100%",
+                                          marginTop: 10,
+                                          background: COLORS.green,
+                                          color: "white",
+                                          border: `1px solid ${COLORS.green}`,
+                                        }}
+                                      >
+                                        Submit Round {nextRound} Scores
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -3500,7 +3475,6 @@ export default function PuttingPage() {
                         {Array.from({ length: stations }, (_, i) => i + 1).map(
                           (stNum) => {
                             const open = !!openStations[stNum];
-
                             const stationRows = cardPlayers.map((p) => {
                               const made = madeFor(currentRound, stNum, p.id);
                               return {
@@ -3678,7 +3652,6 @@ export default function PuttingPage() {
                         >
                           Round {currentRound} Totals (This Card)
                         </div>
-
                         <div style={{ display: "grid", gap: 8 }}>
                           {cardPlayers.map((p) => {
                             const total = roundTotalForPlayer(
@@ -3781,7 +3754,7 @@ export default function PuttingPage() {
                 {playMode === "sequential"
                   ? "(Only Submitted Rounds)"
                   : "(Cumulative)"}{" "}
-                {" — "}
+                {" — "}{" "}
                 {poolMode === "combined" ? "Combined Pool" : "Split Pool"}
               </span>
               <span style={{ fontSize: 12, opacity: 0.75 }}>
@@ -3909,7 +3882,7 @@ export default function PuttingPage() {
                                                 opacity: 0.75,
                                               }}
                                             >
-                                              (adj {r.adj > 0 ? "+" : ""}{" "}
+                                              (adj {r.adj > 0 ? "+" : ""}
                                               {r.adj})
                                             </span>
                                           ) : null}
@@ -3938,9 +3911,6 @@ export default function PuttingPage() {
                                               fontSize: 12,
                                               opacity: 0.75,
                                               marginTop: 2,
-                                              whiteSpace: "nowrap",
-                                              overflow: "hidden",
-                                              textOverflow: "ellipsis",
                                             }}
                                           >
                                             (through round {r.throughRound || 0}
