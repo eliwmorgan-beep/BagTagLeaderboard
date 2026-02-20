@@ -46,9 +46,9 @@ function clampMade(v) {
 /**
  * Compute card sizes using ONLY 2/3/4 (never 1).
  * Preference:
- *  - Never create 1s
- *  - Avoid 2s when possible
- *  - Keep sizes <= 4
+ * - Never create 1s
+ * - Avoid 2s when possible
+ * - Keep sizes <= 4
  */
 function computeCardSizesNoOnes(n) {
   if (n <= 0) return [];
@@ -80,10 +80,8 @@ function computeCardSizesNoOnes(n) {
     for (const s of sizes) {
       const ns = sum + s;
       if (ns > n) continue;
-
       const prev = best[sum];
       const nextCombo = [...prev.combo, s];
-
       const num2 = prev.score[0] + (s === 2 ? 1 : 0);
       const num4 = prev.score[1] + (s === 4 ? 1 : 0);
       const len = prev.score[2] + 1;
@@ -96,13 +94,11 @@ function computeCardSizesNoOnes(n) {
   }
 
   const result = best[n]?.combo || [];
-
   if (result.some((x) => x === 1)) {
     return Array.from({ length: Math.floor(n / 3) }, () => 3).concat(
       n % 3 === 2 ? [2] : n % 3 === 1 ? [4] : []
     );
   }
-
   return result;
 }
 
@@ -168,7 +164,6 @@ function allocatePositionAmountsDollars(potDollars, shares) {
       extra -= take;
     }
   }
-
   return amounts;
 }
 
@@ -193,7 +188,6 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     const groupSize = g.members.length;
     const start = pos;
     const end = pos + groupSize - 1;
-
     if (start > nPositions) break;
 
     const coveredStart = Math.max(start, 1);
@@ -207,7 +201,6 @@ function computeTieAwarePayoutsForPoolFromAmounts(rowsSorted, positionAmounts) {
     if (groupDollars > 0) {
       const perMember = Math.floor(groupDollars / groupSize);
       let rem = groupDollars - perMember * groupSize;
-
       g.members.forEach((m) => {
         payouts[m.id] = (payouts[m.id] || 0) + perMember + (rem > 0 ? 1 : 0);
         if (rem > 0) rem -= 1;
@@ -226,7 +219,6 @@ function computeTiedRanks(rowsSorted) {
   const ranks = [];
   let prevTotal = null;
   let prevRank = 1;
-
   rowsSorted.forEach((r, idx) => {
     if (idx === 0) {
       ranks.push(1);
@@ -242,7 +234,6 @@ function computeTiedRanks(rowsSorted) {
       prevTotal = r.total;
     }
   });
-
   return ranks;
 }
 
@@ -296,7 +287,6 @@ export default function PuttingPage() {
       // new:
       playMode: "simultaneous", // simultaneous | sequential
       poolMode: "split", // split | combined
-
       stations: 1,
       rounds: 1,
 
@@ -362,10 +352,8 @@ export default function PuttingPage() {
   const settings = putting.settings || {};
   const playMode = String(settings.playMode || "simultaneous");
   const poolMode = String(settings.poolMode || "split");
-
   const stations = Math.max(1, Math.min(18, Number(settings.stations || 1)));
   const totalRounds = Math.max(1, Math.min(5, Number(settings.rounds || 1)));
-
   const finalized = !!settings.finalized;
 
   // simultaneous
@@ -374,7 +362,6 @@ export default function PuttingPage() {
   const roundStarted = !!settings.locked && currentRound >= 1;
 
   const players = Array.isArray(putting.players) ? putting.players : [];
-
   const cardsByRound =
     putting.cardsByRound && typeof putting.cardsByRound === "object"
       ? putting.cardsByRound
@@ -393,7 +380,6 @@ export default function PuttingPage() {
   // sequential
   const formatLocked = !!settings.formatLocked;
   const checkinLocked = !!settings.checkinLocked;
-
   const seqCards = Array.isArray(putting.seqCards) ? putting.seqCards : [];
   const seqRoundScores =
     putting.seqRoundScores && typeof putting.seqRoundScores === "object"
@@ -432,9 +418,7 @@ export default function PuttingPage() {
     const r = scores?.[String(roundNum)] || {};
     const st = r?.[String(stationNum)] || {};
     const raw = st?.[playerId];
-
     if (raw === undefined || raw === null || raw === "") return null;
-
     const n = Number(raw);
     return Number.isNaN(n) ? null : n;
   }
@@ -503,7 +487,6 @@ export default function PuttingPage() {
   function requireAdmin(fn) {
     const now = Date.now();
     if (now < adminOkUntil) return fn();
-
     const pw = window.prompt("Admin password:");
     if (pw !== ADMIN_PASSWORD) {
       alert("Wrong password.");
@@ -516,15 +499,14 @@ export default function PuttingPage() {
   // -------- Firestore subscribe + bootstrap --------
   useEffect(() => {
     if (!leagueRef) return;
-
     let unsub = () => {};
     setLoading(true);
     setLoadError("");
 
     (async () => {
       await ensureAnonAuth();
-
       const snap = await getDoc(leagueRef);
+
       if (!snap.exists()) {
         await setDoc(leagueRef, {
           displayName: leagueId,
@@ -569,12 +551,10 @@ export default function PuttingPage() {
               poolMode: st.poolMode || "split",
               stations: Number(st.stations ?? 1),
               rounds: Number(st.rounds ?? 1),
-
               locked: !!st.locked,
               currentRound: Number(st.currentRound ?? 0),
               finalized: !!st.finalized,
               cardMode: String(st.cardMode || ""),
-
               formatLocked: !!st.formatLocked,
               checkinLocked: !!st.checkinLocked,
             },
@@ -647,9 +627,7 @@ export default function PuttingPage() {
     });
   }
 
-  /* ===========================
-     MODE / POOL DESCRIPTIONS
-  =========================== */
+  /* =========================== MODE / POOL DESCRIPTIONS =========================== */
   const modeDesc =
     playMode === "sequential"
       ? "Sequential: Cards play independently. Check-in stays open while cards play. Cards submit one total per player per round (0–50). Leaderboard shows each player’s score “through round X”."
@@ -660,10 +638,7 @@ export default function PuttingPage() {
       ? "Combined Pool: Everyone is on one leaderboard. Pool selection is removed from check-in."
       : "Split Pool: Players choose A/B/C pool at check-in. Leaderboards (and payouts) split by pool.";
 
-  /* ===========================
-     POOL NORMALIZATION
-     - If Combined Pool, we treat all players as pool 'A' internally.
-  =========================== */
+  /* =========================== POOL NORMALIZATION =========================== */
   const normalizedPlayers = useMemo(() => {
     if (poolMode !== "combined") return players;
     return players.map((p) => ({ ...p, pool: "A" }));
@@ -675,20 +650,16 @@ export default function PuttingPage() {
     return map;
   }, [normalizedPlayers]);
 
-  /* ===========================
-     SIMULTANEOUS: CARD HELPERS
-  =========================== */
+  /* =========================== SIMULTANEOUS: CARD HELPERS =========================== */
   function validateRound1Cards(cards) {
     if (!Array.isArray(cards) || cards.length === 0) {
       return { ok: false, reason: "No cards created yet." };
     }
-
     const allIds = new Set(normalizedPlayers.map((p) => p.id));
     const seen = new Set();
 
     for (const c of cards) {
       const ids = Array.isArray(c.playerIds) ? c.playerIds : [];
-
       if (ids.length > 4)
         return { ok: false, reason: "A card has more than 4 players." };
       if (ids.length < 2) {
@@ -698,7 +669,6 @@ export default function PuttingPage() {
             "A card has only 1 player. Cards must have at least 2 players.",
         };
       }
-
       for (const pid of ids) {
         if (!allIds.has(pid))
           return { ok: false, reason: "A card contains an unknown player." };
@@ -717,7 +687,6 @@ export default function PuttingPage() {
         reason: "Not all checked-in players are assigned to a card yet.",
       };
     }
-
     return { ok: true, reason: "" };
   }
 
@@ -727,11 +696,9 @@ export default function PuttingPage() {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
-
     const sizes = computeCardSizesNoOnes(arr.length);
     const cards = [];
     let idx = 0;
-
     sizes.forEach((sz) => {
       const chunk = arr.slice(idx, idx + sz);
       idx += sz;
@@ -741,7 +708,6 @@ export default function PuttingPage() {
         playerIds: chunk.map((p) => p.id),
       });
     });
-
     return cards;
   }
 
@@ -753,7 +719,6 @@ export default function PuttingPage() {
     const sizes = computeCardSizesNoOnes(ranked.length);
     const cards = [];
     let idx = 0;
-
     sizes.forEach((sz) => {
       const chunk = ranked.slice(idx, idx + sz);
       idx += sz;
@@ -763,14 +728,67 @@ export default function PuttingPage() {
         playerIds: chunk.map((x) => x.id),
       });
     });
-
     return cards;
   }
 
-  /* ===========================
-     ADMIN ACTIONS
-  =========================== */
+  /* =========================== SEQUENTIAL: RANDOMIZE CARDS HELPERS =========================== */
+  function buildRandomSeqCardsAllPlayers() {
+    const arr = [...normalizedPlayers];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    const sizes = computeCardSizesNoOnes(arr.length);
+    const cards = [];
+    let idx = 0;
+    sizes.forEach((sz) => {
+      const chunk = arr.slice(idx, idx + sz);
+      idx += sz;
+      cards.push({
+        id: uid(),
+        name: `Card ${cards.length + 1}`,
+        playerIds: chunk.map((p) => p.id),
+      });
+    });
+    return cards;
+  }
 
+  async function randomizeSequentialCards() {
+    if (finalized) return;
+    if (playMode !== "sequential") return;
+    if (!formatLocked)
+      return alert("Admin must click Lock Format and Open Check-In first.");
+    // ✅ CHANGE #1: Do not allow / do not show this until check-in is locked
+    if (!checkinLocked) return;
+
+    await requireAdmin(async () => {
+      if (normalizedPlayers.length < 2) {
+        alert("Check in at least 2 players first.");
+        return;
+      }
+
+      const ok = window.confirm(
+        "Randomize cards for all checked-in players?\n\nThis will replace any existing cards."
+      );
+      if (!ok) return;
+
+      const cards = buildRandomSeqCardsAllPlayers();
+
+      // Replace cards. Keep any existing scores/submissions (rare) would mismatch,
+      // so we clear sequential scoring/submission state when re-randomizing.
+      await updatePutting({
+        seqCards: cards,
+        seqRoundScores: {},
+        seqSubmitted: {},
+      });
+
+      setSeqSelected([]);
+      setSeqCardName("");
+      setCardsOpen(true);
+    });
+  }
+
+  /* =========================== ADMIN ACTIONS =========================== */
   // Add player (works for both modes; sequential respects checkin lock)
   async function addPlayer() {
     if (finalized) {
@@ -813,7 +831,6 @@ export default function PuttingPage() {
     };
 
     await updatePutting({ players: [...players, newPlayer] });
-
     setName("");
     setPool("A");
   }
@@ -821,9 +838,7 @@ export default function PuttingPage() {
   // Mode toggle
   async function setPlayMode(nextMode) {
     if (finalized) return;
-
     await requireAdmin(async () => {
-      // If already "in progress" in one mode, warn
       const hasSimData =
         (putting.players?.length || 0) > 0 ||
         Object.keys(putting.cardsByRound || {}).length > 0 ||
@@ -845,10 +860,7 @@ export default function PuttingPage() {
       }
 
       await updatePutting({
-        settings: {
-          ...settings,
-          playMode: nextMode,
-        },
+        settings: { ...settings, playMode: nextMode },
       });
     });
   }
@@ -863,16 +875,11 @@ export default function PuttingPage() {
         );
         return;
       }
-      await updatePutting({
-        settings: { ...settings, poolMode: next },
-      });
+      await updatePutting({ settings: { ...settings, poolMode: next } });
     });
   }
 
-  /* ===========================
-     SIMULTANEOUS MODE ACTIONS
-  =========================== */
-
+  /* =========================== SIMULTANEOUS MODE ACTIONS =========================== */
   function toggleSelectForCard(playerId) {
     setSelectedForCard((prev) =>
       prev.includes(playerId)
@@ -889,19 +896,16 @@ export default function PuttingPage() {
 
   async function randomizeRound1Cards() {
     if (finalized || roundStarted) return;
-
     if (normalizedPlayers.length < 2) {
       alert("Check in at least 2 players first.");
       return;
     }
-
     const cards = buildRandomCardsRound1();
     await updatePutting({
       settings: { ...settings, cardMode: "random" },
       cardsByRound: { ...(putting.cardsByRound || {}), 1: cards },
       submitted: { ...(putting.submitted || {}), 1: {} },
     });
-
     setSelectedForCard([]);
     setCardName("");
     setCardsOpen(true);
@@ -914,7 +918,8 @@ export default function PuttingPage() {
       return;
     }
     if (cardMode !== "manual") {
-      alert("Choose 'Manually Create Cards' first.");
+      // ✅ CHANGE #2: Keep function same; just wording updated elsewhere
+      alert('Choose "Manually Create Card(s)" first.');
       return;
     }
 
@@ -925,7 +930,6 @@ export default function PuttingPage() {
     const cards = Array.isArray(cardsByRound["1"]) ? cardsByRound["1"] : [];
     const used = new Set();
     cards.forEach((c) => (c.playerIds || []).forEach((id) => used.add(id)));
-
     const overlaps = selectedForCard.some((id) => used.has(id));
     if (overlaps)
       return alert(
@@ -939,7 +943,6 @@ export default function PuttingPage() {
     };
 
     await updatePuttingDot("cardsByRound.1", [...cards, newCard]);
-
     setSelectedForCard([]);
     setCardName("");
     setName("");
@@ -948,7 +951,6 @@ export default function PuttingPage() {
 
   async function beginRoundOneSimultaneous() {
     if (finalized) return;
-
     await requireAdmin(async () => {
       if (normalizedPlayers.length < 2)
         return alert("Check in at least 2 players first.");
@@ -956,7 +958,7 @@ export default function PuttingPage() {
       const check = validateRound1Cards(r1Cards);
       if (!check.ok) {
         alert(
-          `Round 1 can't begin yet.\n\n${check.reason}\n\nTip: Choose "Manually Create Cards" or "Randomize Cards" and make sure everyone is assigned.`
+          `Round 1 can't begin yet.\n\n${check.reason}\n\nTip: Choose "Manually Create Card(s)" or "Randomize Cards" and make sure everyone is assigned.`
         );
         return;
       }
@@ -985,12 +987,12 @@ export default function PuttingPage() {
 
   async function beginNextRoundSimultaneous() {
     if (finalized) return;
-
     await requireAdmin(async () => {
       if (!settings.locked || currentRound < 1)
         return alert("Round 1 has not begun yet.");
       if (currentRound >= totalRounds)
         return alert("You are already on the final round.");
+
       if (!allCardsSubmittedForRound(currentRound)) {
         const missing = missingCardsForRound(currentRound);
         const names = missing.map((c) => c.name).join(", ");
@@ -1011,7 +1013,10 @@ export default function PuttingPage() {
           ...(putting.cardsByRound || {}),
           [String(nextRound)]: autoCards,
         },
-        submitted: { ...(putting.submitted || {}), [String(nextRound)]: {} },
+        submitted: {
+          ...(putting.submitted || {}),
+          [String(nextRound)]: {},
+        },
       });
 
       setActiveCardId("");
@@ -1025,6 +1030,7 @@ export default function PuttingPage() {
       return alert("League hasn't started yet.");
     if (currentRound !== totalRounds)
       return alert("Finalize is only available on the final round.");
+
     if (!allCardsSubmittedForRound(currentRound)) {
       const missing = missingCardsForRound(currentRound);
       const names = missing.map((c) => c.name).join(", ");
@@ -1037,16 +1043,12 @@ export default function PuttingPage() {
     }
 
     await updatePutting({ settings: { ...settings, finalized: true } });
-
     setAdjustOpen(false);
     setPayoutsOpen(false);
     alert("Scores finalized. Leaderboards are now locked.");
   }
 
-  /* ===========================
-     SEQUENTIAL MODE ACTIONS
-  =========================== */
-
+  /* =========================== SEQUENTIAL MODE ACTIONS =========================== */
   async function lockFormatAndOpenCheckin() {
     if (finalized) return;
     await requireAdmin(async () => {
@@ -1074,12 +1076,7 @@ export default function PuttingPage() {
     if (finalized) return;
     await requireAdmin(async () => {
       if (!formatLocked) return alert("Format is not locked/open yet.");
-      await updatePutting({
-        settings: {
-          ...settings,
-          checkinLocked: true,
-        },
-      });
+      await updatePutting({ settings: { ...settings, checkinLocked: true } });
     });
   }
 
@@ -1104,12 +1101,10 @@ export default function PuttingPage() {
 
   async function createCardSequential() {
     if (finalized) return;
-
     if (!formatLocked) {
       alert("Admin must click Lock Format and Open Check-In first.");
       return;
     }
-
     const count = seqSelected.length;
     if (count < 2) return alert("Select at least 2 players for a card.");
     if (count > 4) return alert("Max 4 players per card.");
@@ -1127,10 +1122,7 @@ export default function PuttingPage() {
       playerIds: [...seqSelected],
     };
 
-    await updatePutting({
-      seqCards: [...seqCards, newCard],
-    });
-
+    await updatePutting({ seqCards: [...seqCards, newCard] });
     setSeqSelected([]);
     setSeqCardName("");
   }
@@ -1139,9 +1131,8 @@ export default function PuttingPage() {
     // returns { total, throughRound }
     let total = 0;
     let through = 0;
+
     for (let r = 1; r <= totalRounds; r++) {
-      // only count if that round has been submitted by THAT card; but we don't know card here
-      // In sequential, we count a player's round if there exists a submitted card round that contains them.
       const roundSubmitted = seqSubmitted?.[String(r)] || {};
       const roundScores = seqRoundScores?.[String(r)] || {};
       let counted = false;
@@ -1162,24 +1153,21 @@ export default function PuttingPage() {
 
       if (counted) through = r;
     }
+
     return { total, throughRound: through };
   }
 
   async function setSeqPlayerRoundScore(roundNum, cardId, playerId, val) {
     if (finalized) return;
-
     const n = clampInt(val, 0, 50);
-
     const path = `puttingLeague.seqRoundScores.${String(roundNum)}.${String(
       cardId
     )}.${String(playerId)}`;
-
     await updateDoc(leagueRef, { [path]: n });
   }
 
   async function submitSeqCardRound(cardId, roundNum) {
     if (finalized) return;
-
     const card = seqCards.find((c) => c.id === cardId);
     if (!card) return;
 
@@ -1208,23 +1196,17 @@ export default function PuttingPage() {
 
   async function finalizeLeaderboardSequential() {
     if (finalized) return;
-
     await requireAdmin(async () => {
       const ok = window.confirm(
         "Finalize Leaderboard?\n\nThis locks all scores and prevents any more submissions."
       );
       if (!ok) return;
-
-      await updatePutting({
-        settings: { ...settings, finalized: true },
-      });
+      await updatePutting({ settings: { ...settings, finalized: true } });
       alert("Finalized ✅");
     });
   }
 
-  /* ===========================
-     RESET
-  =========================== */
+  /* =========================== RESET =========================== */
   async function resetPuttingLeague() {
     await requireAdmin(async () => {
       const ok = window.confirm(
@@ -1276,9 +1258,7 @@ export default function PuttingPage() {
     });
   }
 
-  /* ===========================
-     ADJUSTMENTS (shared)
-  =========================== */
+  /* =========================== ADJUSTMENTS (shared) =========================== */
   async function openAdjustmentsEditor() {
     if (finalized)
       return alert("Leaderboards are finalized. Adjustments are locked.");
@@ -1287,7 +1267,6 @@ export default function PuttingPage() {
 
   async function setFinalLeaderboardTotal(playerId, desiredFinalTotal) {
     if (finalized) return;
-
     await requireAdmin(async () => {
       const base =
         playMode === "simultaneous"
@@ -1296,7 +1275,6 @@ export default function PuttingPage() {
 
       const desired = Number(desiredFinalTotal);
       if (Number.isNaN(desired)) return;
-
       const adj = desired - base;
       await updatePuttingDot(`adjustments.${playerId}`, adj);
     });
@@ -1304,16 +1282,13 @@ export default function PuttingPage() {
 
   async function clearAdjustment(playerId) {
     if (finalized) return;
-
     await requireAdmin(async () => {
       const path = `puttingLeague.adjustments.${playerId}`;
       await updateDoc(leagueRef, { [path]: deleteField() });
     });
   }
 
-  /* ===========================
-     SCOREKEEPER (SIMULTANEOUS)
-  =========================== */
+  /* =========================== SCOREKEEPER (SIMULTANEOUS) =========================== */
   function toggleStation(stationNum) {
     setOpenStations((prev) => ({ ...prev, [stationNum]: !prev[stationNum] }));
   }
@@ -1334,12 +1309,10 @@ export default function PuttingPage() {
     const path = `puttingLeague.scores.${String(roundNum)}.${String(
       stationNum
     )}.${playerId}`;
-
     if (made === "" || made === null || made === undefined) {
       await updateDoc(leagueRef, { [path]: deleteField() });
       return;
     }
-
     const val = clampMade(made);
     await updateDoc(leagueRef, { [path]: val });
   }
@@ -1347,7 +1320,6 @@ export default function PuttingPage() {
   function isCardFullyFilled(roundNum, card) {
     const ids = card?.playerIds || [];
     if (!ids.length) return false;
-
     for (let s = 1; s <= stations; s++) {
       for (const pid of ids) {
         if (!rawMadeExists(roundNum, s, pid)) return false;
@@ -1358,7 +1330,6 @@ export default function PuttingPage() {
 
   async function submitCardScores(cardId) {
     if (finalized) return;
-
     const card = currentCards.find((c) => c.id === cardId);
     if (!card) return;
 
@@ -1373,12 +1344,7 @@ export default function PuttingPage() {
     alert("Card submitted (locked)!");
   }
 
-  /* ===========================
-     LEADERBOARDS
-     - Simultaneous: cumulative by stations/rounds
-     - Sequential: cumulative of submitted rounds only, with "through round X"
-     - Pool mode: split or combined
-  =========================== */
+  /* =========================== LEADERBOARDS =========================== */
   const leaderboardData = useMemo(() => {
     const pools = { A: [], B: [], C: [] };
 
@@ -1395,7 +1361,6 @@ export default function PuttingPage() {
 
       const adj = Number(adjustments?.[p.id] ?? 0) || 0;
       const total = base + adj;
-
       const payoutDollars = Number(payoutsPosted?.[p.id] ?? 0) || 0;
 
       const row = {
@@ -1408,9 +1373,8 @@ export default function PuttingPage() {
         throughRound: through,
       };
 
-      if (poolMode === "combined") {
-        pools.A.push(row);
-      } else {
+      if (poolMode === "combined") pools.A.push(row);
+      else {
         if (p.pool === "B") pools.B.push(row);
         else if (p.pool === "C") pools.C.push(row);
         else pools.A.push(row);
@@ -1435,9 +1399,7 @@ export default function PuttingPage() {
     seqSubmitted,
   ]);
 
-  /* ===========================
-     PAYOUTS (kept as-is, pool mode influences which pools exist)
-  =========================== */
+  /* =========================== PAYOUTS =========================== */
   function computeAllPayoutsDollars() {
     if (!payoutConfig) return { ok: false, reason: "No payout configuration." };
     if (!payoutConfig.enabled)
@@ -1453,7 +1415,6 @@ export default function PuttingPage() {
     const totalPotDollars = buyIn * normalizedPlayers.length;
     const feeDollars = Math.round((totalPotDollars * feePct) / 100);
     const potAfterFeeDollars = Math.max(0, totalPotDollars - feeDollars);
-
     if (potAfterFeeDollars <= 0)
       return { ok: false, reason: "Pot after fee is $0." };
 
@@ -1479,10 +1440,8 @@ export default function PuttingPage() {
     const countB = pools.B.length;
     const countC = pools.C.length;
 
-    // In combined pool, B and C are empty; payout still works on A.
     if (mode === "pool") {
       const payouts = {};
-
       const poolPotDollars = (poolCount) => {
         const poolTotal = buyIn * poolCount;
         const poolFee = Math.round((poolTotal * feePct) / 100);
@@ -1492,17 +1451,13 @@ export default function PuttingPage() {
       const doPool = (key) => {
         const rows = pools[key];
         const pot = poolPotDollars(rows.length);
-
         const places = payoutPlacesForPoolSize(rows.length);
         const shares = sharesByPoolMode(places);
-
         const positionAmounts = allocatePositionAmountsDollars(pot, shares);
-
         const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
           rows,
           positionAmounts
         );
-
         Object.entries(poolPayouts).forEach(([pid, dollars]) => {
           payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
         });
@@ -1543,7 +1498,6 @@ export default function PuttingPage() {
 
     const base = COLLECTIVE_BASE_WEIGHTS.slice(0, slots.length);
     const slotShares = scaleWeightsToFractions(base);
-
     const slotAmounts = allocatePositionAmountsDollars(
       potAfterFeeDollars,
       slotShares
@@ -1563,12 +1517,10 @@ export default function PuttingPage() {
         (x) => typeof x === "number"
       );
       if (!amounts.length) return;
-
       const poolPayouts = computeTieAwarePayoutsForPoolFromAmounts(
         pools[k],
         amounts
       );
-
       Object.entries(poolPayouts).forEach(([pid, dollars]) => {
         payouts[pid] = (payouts[pid] || 0) + (Number(dollars) || 0);
       });
@@ -1591,19 +1543,15 @@ export default function PuttingPage() {
 
   async function postPayoutsToLeaderboard() {
     if (!finalized) return;
-
     await requireAdmin(async () => {
       if (!payoutConfig.enabled) return alert("Payouts are disabled.");
-
       const result = computeAllPayoutsDollars();
       if (!result.ok)
         return alert(result.reason || "Unable to compute payouts.");
-
       const ok = window.confirm(
         "Post payouts to the leaderboard?\n\nThis will write FULL DOLLAR amounts next to the winning players."
       );
       if (!ok) return;
-
       await updatePutting({ payoutsPosted: result.payouts });
       alert("Payouts posted ✅");
     });
@@ -1612,7 +1560,6 @@ export default function PuttingPage() {
   async function togglePayoutsEnabled() {
     await requireAdmin(async () => {
       const next = !payoutConfig.enabled;
-
       if (!next) {
         await updatePutting({
           payoutConfig: {
@@ -1626,19 +1573,15 @@ export default function PuttingPage() {
         alert("Payouts disabled (posted payouts cleared).");
         return;
       }
-
       await updatePutting({
         payoutConfig: { ...payoutConfig, enabled: true, updatedAt: Date.now() },
         payoutsPosted: {},
       });
-
       alert("Payouts enabled ✅");
     });
   }
 
-  /* ===========================
-     UI GATING
-  =========================== */
+  /* =========================== UI GATING =========================== */
   const canBeginNextRound =
     playMode === "simultaneous" &&
     roundStarted &&
@@ -1672,9 +1615,7 @@ export default function PuttingPage() {
   const hasPostedPayouts =
     payoutsEnabled && Object.keys(payoutsPosted || {}).length > 0;
 
-  /* ===========================
-     GUARDS
-  =========================== */
+  /* =========================== GUARDS =========================== */
   if (!leagueId) {
     return (
       <div>
@@ -1717,9 +1658,7 @@ export default function PuttingPage() {
     );
   }
 
-  /* ===========================
-     RENDER
-  =========================== */
+  /* =========================== RENDER =========================== */
   return (
     <div
       style={{
@@ -1760,9 +1699,7 @@ export default function PuttingPage() {
             <span>
               League: <strong>{leagueId}</strong>
             </span>
-
             <span style={{ opacity: 0.6 }}>•</span>
-
             <NavLink
               to={`/league/${encodeURIComponent(leagueId)}`}
               style={{
@@ -1816,7 +1753,6 @@ export default function PuttingPage() {
                   {submitStats.submitted} / {submitStats.total}
                 </strong>
               </div>
-
               {missingCardsThisRound.length > 0 ? (
                 <div style={{ marginTop: 6 }}>
                   Waiting on:{" "}
@@ -1866,7 +1802,7 @@ export default function PuttingPage() {
             {setupOpen && (
               <div style={{ marginTop: 10 }}>
                 <div style={{ display: "grid", gap: 10 }}>
-                  {/* ✅ Format selector (kept in the style you like) */}
+                  {/* ✅ Format selector */}
                   <div>
                     <div
                       style={{
@@ -1896,7 +1832,7 @@ export default function PuttingPage() {
                     </select>
                   </div>
 
-                  {/* ✅ Pool selector (kept in the style you like) */}
+                  {/* ✅ Pool selector */}
                   <div>
                     <div
                       style={{
@@ -2418,7 +2354,6 @@ export default function PuttingPage() {
                               playMode === "simultaneous"
                                 ? cumulativeBaseTotalForPlayer(p.id)
                                 : seqCardRoundTotalsForPlayer(p.id).total;
-
                             const adj = Number(adjustments?.[p.id] ?? 0) || 0;
                             const total = base + adj;
 
@@ -2453,6 +2388,7 @@ export default function PuttingPage() {
                                       </span>
                                     ) : null}
                                   </div>
+
                                   <div
                                     style={{
                                       fontSize: 12,
@@ -2659,6 +2595,7 @@ export default function PuttingPage() {
                           <div style={{ fontWeight: 900, color: COLORS.text }}>
                             {p.name}
                           </div>
+
                           {poolMode === "split" ? (
                             <div
                               style={{
@@ -2709,6 +2646,7 @@ export default function PuttingPage() {
                       </div>
 
                       <div style={{ display: "grid", gap: 10 }}>
+                        {/* ✅ CHANGE #2: Label updated */}
                         <button
                           onClick={setCardModeManual}
                           style={{
@@ -2719,7 +2657,7 @@ export default function PuttingPage() {
                             color: COLORS.navy,
                           }}
                         >
-                          Manually Create Cards
+                          Manually Create Card(s)
                         </button>
 
                         <button
@@ -2774,6 +2712,7 @@ export default function PuttingPage() {
                       >
                         Form a Card (Sequential Mode)
                       </div>
+
                       <div
                         style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}
                       >
@@ -2796,6 +2735,7 @@ export default function PuttingPage() {
                           style={{ ...inputStyle, width: 240 }}
                           disabled={finalized}
                         />
+
                         <button
                           onClick={createCardSequential}
                           style={{
@@ -2808,11 +2748,31 @@ export default function PuttingPage() {
                         >
                           Create Card
                         </button>
+
                         <div style={{ fontSize: 12, opacity: 0.75 }}>
                           Selected: <strong>{seqSelected.length}</strong> / 4
                           (min 2)
                         </div>
                       </div>
+
+                      {/* ✅ CHANGE #1: Randomize Cards button ONLY appears after check-in is locked */}
+                      {checkinLocked ? (
+                        <button
+                          onClick={randomizeSequentialCards}
+                          style={{
+                            ...smallButtonStyle,
+                            width: "100%",
+                            background: COLORS.navy,
+                            color: "white",
+                            border: `1px solid ${COLORS.navy}`,
+                            marginBottom: 10,
+                          }}
+                          disabled={finalized || normalizedPlayers.length < 2}
+                          title="Requires admin password. Only available after Lock Check-In."
+                        >
+                          Randomize Cards
+                        </button>
+                      ) : null}
 
                       {seqUnassignedPlayers.length === 0 ? (
                         <div style={{ fontSize: 12, opacity: 0.75 }}>
@@ -2854,6 +2814,7 @@ export default function PuttingPage() {
                                     {p.name}
                                   </div>
                                 </div>
+
                                 {poolMode === "split" ? (
                                   <div
                                     style={{
@@ -2878,6 +2839,15 @@ export default function PuttingPage() {
                           })}
                         </div>
                       )}
+
+                      {!checkinLocked ? (
+                        <div
+                          style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}
+                        >
+                          Randomize Cards will appear after the admin locks
+                          check-in.
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -2959,6 +2929,7 @@ export default function PuttingPage() {
                               style={{ ...inputStyle, width: 240 }}
                               disabled={finalized}
                             />
+
                             <button
                               onClick={createCardSimultaneous}
                               style={{
@@ -3021,6 +2992,7 @@ export default function PuttingPage() {
                                       {p.name}
                                     </div>
                                   </div>
+
                                   {poolMode === "split" ? (
                                     <div
                                       style={{
@@ -3096,6 +3068,7 @@ export default function PuttingPage() {
                               </span>
                             ) : null}
                           </div>
+
                           <div style={{ marginTop: 6, fontSize: 14 }}>
                             {(c.playerIds || []).map((pid) => {
                               const p = normalizedPlayerById[pid];
@@ -3251,7 +3224,6 @@ export default function PuttingPage() {
                                     {(c.playerIds || []).map((pid) => {
                                       const p = normalizedPlayerById[pid];
                                       if (!p) return null;
-
                                       const currentVal =
                                         seqRoundScores?.[String(nextRound)]?.[
                                           c.id
@@ -3615,7 +3587,6 @@ export default function PuttingPage() {
                         >
                           Round {currentRound} Totals (This Card)
                         </div>
-
                         <div style={{ display: "grid", gap: 8 }}>
                           {cardPlayers.map((p) => {
                             const total = roundTotalForPlayer(
@@ -3672,7 +3643,6 @@ export default function PuttingPage() {
                             : "Submit Card Scores"}
                         </button>
 
-                        {/* ✅ Removed confusing admin-password text */}
                         <div
                           style={{
                             marginTop: 8,
@@ -3695,8 +3665,8 @@ export default function PuttingPage() {
             </div>
           ) : null}
 
-                    {/* LEADERBOARDS */}
-                    <div style={{ textAlign: "left" }}>
+          {/* LEADERBOARDS */}
+          <div style={{ textAlign: "left" }}>
             <div
               onClick={() => setLeaderboardsOpen((v) => !v)}
               style={{
@@ -3718,7 +3688,7 @@ export default function PuttingPage() {
                 Leaderboards{" "}
                 {playMode === "sequential"
                   ? "(Only Submitted Rounds)"
-                  : "(Cumulative)"}
+                  : "(Cumulative)"}{" "}
                 {" — "}
                 {poolMode === "combined" ? "Combined Pool" : "Split Pool"}
               </span>
@@ -3839,7 +3809,6 @@ export default function PuttingPage() {
                                           }}
                                         >
                                           {r.name}
-
                                           {r.adj ? (
                                             <span
                                               style={{
@@ -3882,8 +3851,8 @@ export default function PuttingPage() {
                                               textOverflow: "ellipsis",
                                             }}
                                           >
-                                            (through round{" "}
-                                            {r.throughRound || 0})
+                                            (through round {r.throughRound || 0}
+                                            )
                                           </div>
                                         ) : null}
                                       </div>
@@ -3921,7 +3890,7 @@ export default function PuttingPage() {
               textAlign: "center",
             }}
           >
-            {APP_VERSION} • Developed by Eli Morgan
+            {APP_VERSION} Beta• Developed by Eli Morgan
           </div>
         </div>
       </div>
