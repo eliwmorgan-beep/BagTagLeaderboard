@@ -1727,7 +1727,8 @@ export default function PuttingPage() {
         background: `linear-gradient(180deg, ${COLORS.blueLight} 0%, #ffffff 60%)`,
         display: "flex",
         justifyContent: "center",
-        padding: 24,
+        // ✅ responsive outer padding (keeps desktop same; gives phones room)
+        padding: "clamp(12px, 4vw, 24px)",
       }}
     >
       <div style={{ width: "100%", maxWidth: 760 }}>
@@ -1736,7 +1737,8 @@ export default function PuttingPage() {
             textAlign: "center",
             background: COLORS.panel,
             borderRadius: 18,
-            padding: 26,
+            // ✅ responsive panel padding (keeps desktop same; gives phones room)
+            padding: "clamp(14px, 4vw, 26px)",
             border: `2px solid ${COLORS.navy}`,
             boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
           }}
@@ -3796,6 +3798,8 @@ export default function PuttingPage() {
                                       justifyContent: "space-between",
                                       alignItems: "center",
                                       gap: 10,
+                                      // ✅ allow wrap on small screens so score never cuts off
+                                      flexWrap: "wrap",
                                     }}
                                   >
                                     <div
@@ -3885,6 +3889,8 @@ export default function PuttingPage() {
                                         fontWeight: 900,
                                         color: COLORS.navy,
                                         whiteSpace: "nowrap",
+                                        // ✅ keeps score on the right even when wrapping
+                                        marginLeft: "auto",
                                       }}
                                     >
                                       {r.total} pts
