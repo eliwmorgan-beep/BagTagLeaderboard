@@ -3695,8 +3695,8 @@ export default function PuttingPage() {
             </div>
           ) : null}
 
-          {/* LEADERBOARDS */}
-          <div style={{ textAlign: "left" }}>
+                    {/* LEADERBOARDS */}
+                    <div style={{ textAlign: "left" }}>
             <div
               onClick={() => setLeaderboardsOpen((v) => !v)}
               style={{
@@ -3798,7 +3798,6 @@ export default function PuttingPage() {
                                       justifyContent: "space-between",
                                       alignItems: "center",
                                       gap: 10,
-                                      // ✅ allow wrap on small screens so score never cuts off
                                       flexWrap: "wrap",
                                     }}
                                   >
@@ -3830,6 +3829,7 @@ export default function PuttingPage() {
                                       </div>
 
                                       <div style={{ minWidth: 0 }}>
+                                        {/* LINE 1 — Name */}
                                         <div
                                           style={{
                                             fontWeight: 900,
@@ -3839,18 +3839,6 @@ export default function PuttingPage() {
                                           }}
                                         >
                                           {r.name}
-                                          {playMode === "sequential" ? (
-                                            <span
-                                              style={{
-                                                fontSize: 12,
-                                                marginLeft: 8,
-                                                opacity: 0.75,
-                                              }}
-                                            >
-                                              — through round{" "}
-                                              {r.throughRound || 0}
-                                            </span>
-                                          ) : null}
 
                                           {r.adj ? (
                                             <span
@@ -3881,6 +3869,23 @@ export default function PuttingPage() {
                                             </span>
                                           ) : null}
                                         </div>
+
+                                        {/* LINE 2 — Through Round */}
+                                        {playMode === "sequential" ? (
+                                          <div
+                                            style={{
+                                              fontSize: 12,
+                                              opacity: 0.75,
+                                              marginTop: 2,
+                                              whiteSpace: "nowrap",
+                                              overflow: "hidden",
+                                              textOverflow: "ellipsis",
+                                            }}
+                                          >
+                                            (through round{" "}
+                                            {r.throughRound || 0})
+                                          </div>
+                                        ) : null}
                                       </div>
                                     </div>
 
@@ -3889,7 +3894,6 @@ export default function PuttingPage() {
                                         fontWeight: 900,
                                         color: COLORS.navy,
                                         whiteSpace: "nowrap",
-                                        // ✅ keeps score on the right even when wrapping
                                         marginLeft: "auto",
                                       }}
                                     >
